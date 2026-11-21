@@ -1222,6 +1222,10 @@ it.layer(
     "persists, changes, and clears explicit grouping without changing physical identity",
     () =>
       Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const trackedRoot = yield* fileSystem.realPath(
+          yield* fileSystem.makeTempDirectoryScoped({ prefix: "grouped-folder-" }),
+        );
         const service = yield* ProjectService.ProjectService;
         const projectId = ProjectId.make("explicit-grouping");
         const identity = "39c61a1b-8a64-43a6-9da5-65c15da93d52";
@@ -1365,6 +1369,7 @@ it.layer(
             archived: true,
           });
           const restoration = {
+            ...(index === 1 ? { trackedFolders: [{ path: trackedRoot, name: "External" }] } : {}),
             commandId: CommandId.make(`group-restore-${index}`),
             projectId: ProjectId.make(`unused-restore-${index}`),
             workspaceRoot: created.workspaceRoot,
@@ -1379,12 +1384,14 @@ it.layer(
           assert.isNull(restored.archivedAt);
           assert.equal(restored.title, scenario.expectedTitle);
           assert.equal(restored.groupingIdentity, scenario.expectedIdentity);
+          if (index >= 1)
+            assert.isTrue(restored.trackedFolders?.some((folder) => folder.path === trackedRoot));
         }
         assert.lengthOf((yield* service.snapshot).projects, 1);
         assert.deepEqual(
           yield* sql`SELECT * FROM orchestration_v2_projection_threads`,
           threadsBefore,
         );
-      }),
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 });
