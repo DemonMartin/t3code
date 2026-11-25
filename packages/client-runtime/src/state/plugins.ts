@@ -118,4 +118,4 @@ export function createPluginSummaryAtoms(input: {
   return { pluginCatalogsAtom, pluginStatusByEnvironmentAtom, managedPluginEnvironmentsAtom };
 }
 
-export { createManagedPluginConnections } from "../plugins/managed.ts";
+export { createManagedPluginConnections, managedEnvironmentOwners } from "../plugins/managed.ts";

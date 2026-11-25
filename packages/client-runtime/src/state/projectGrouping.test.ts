@@ -11,6 +11,7 @@ import {
   resolveGroupDefaultProject,
   resolveManagedEnvironmentOwnerProject,
   resolveScratchProjectScopeKey,
+  selectNewDraftProject,
   sortProjectsByGroupOrder,
   type ProjectGroupingSettings,
 } from "./projectGrouping.ts";
@@ -329,7 +330,7 @@ describe("buildProjectGroups", () => {
       environmentId: sandboxEnvironmentId,
       repositoryIdentity: null,
     });
-    const managed = [{ environmentId: "sandbox", owner: { environmentId: "environment" } }];
+    const managed = new Map([["sandbox", "environment"]]);
     const ownerOf = (
       project: EnvironmentProject,
       projects: ReadonlyArray<EnvironmentProject>,
@@ -346,8 +347,15 @@ describe("buildProjectGroups", () => {
     ).toBe("app");
     // No member of the group on the owner, or not a managed environment: nothing to redirect to.
     expect(ownerOf(sandboxOther, all)).toBe("sandbox-other");
-    expect(ownerOf(sandbox, all, [])).toBe("sandbox-clone");
+    expect(ownerOf(sandbox, all, new Map())).toBe("sandbox-clone");
     expect(ownerOf(root, all)).toBe("root");
+
+    // A default draft opens on the owner's project, and waits for it while only the sandbox loaded.
+    const newDraftOn = (ordered: ReadonlyArray<EnvironmentProject>) =>
+      selectNewDraftProject(ordered, managed, settings("repository"))?.id ?? null;
+    expect(newDraftOn([sandbox, other, root])).toBe("root");
+    expect(newDraftOn([sandbox, sandboxOther])).toBeNull();
+    expect(newDraftOn([sandboxOther, other])).toBe("other");
   });
 
   it("keeps a fork apart from its upstream checkout and labels it by its own remote", () => {

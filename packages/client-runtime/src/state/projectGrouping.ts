@@ -203,15 +203,11 @@ export function resolveGroupDefaultProject<TProject extends EnvironmentProject>(
 export function resolveManagedEnvironmentOwnerProject<TProject extends EnvironmentProject>(
   project: TProject,
   projects: ReadonlyArray<TProject>,
-  managedEnvironments: ReadonlyArray<{
-    readonly environmentId: string;
-    readonly owner: { readonly environmentId: string };
-  }>,
+  /** Owning environment by managed environment id. */
+  managedOwners: ReadonlyMap<string, string>,
   settings: ProjectGroupingSettings,
 ): TProject {
-  const ownerEnvironmentId = managedEnvironments.find(
-    (resource) => resource.environmentId === project.environmentId,
-  )?.owner.environmentId;
+  const ownerEnvironmentId = managedOwners.get(project.environmentId);
   if (ownerEnvironmentId === undefined) return project;
   const groupKey = deriveLogicalProjectKeyFromSettings(project, settings);
   return (
@@ -224,6 +220,22 @@ export function resolveManagedEnvironmentOwnerProject<TProject extends Environme
       ),
     ) ?? project
   );
+}
+
+/**
+ * The project a default draft opens on: the first of `ordered` that new work can start on. A
+ * managed environment's project stands for its owner's, and is passed over until that one loads.
+ */
+export function selectNewDraftProject<TProject extends EnvironmentProject>(
+  ordered: ReadonlyArray<TProject>,
+  managedOwners: ReadonlyMap<string, string>,
+  settings: ProjectGroupingSettings,
+): TProject | null {
+  for (const project of ordered) {
+    const target = resolveManagedEnvironmentOwnerProject(project, ordered, managedOwners, settings);
+    if (!managedOwners.has(target.environmentId)) return target;
+  }
+  return null;
 }
 
 export function resolveScratchProjectScopeKey(

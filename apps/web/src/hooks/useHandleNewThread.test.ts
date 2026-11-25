@@ -12,7 +12,7 @@ const testState = vi.hoisted(() => {
     environmentSelection: undefined as "manual" | undefined,
   };
   let connectedEnvironmentIds = ["environment-primary", "environment-ssh"];
-  let managedEnvironments: { environmentId: string; owner: { environmentId: string } }[] = [];
+  let managedOwners = new Map<string, string>();
   let targetSettings = {
     defaultThreadEnvMode: "local" as "local" | "worktree" | null,
     newWorktreesStartFromOrigin: false,
@@ -82,11 +82,11 @@ const testState = vi.hoisted(() => {
     disconnect(environmentId: string) {
       connectedEnvironmentIds = connectedEnvironmentIds.filter((id) => id !== environmentId);
     },
-    get managedEnvironments() {
-      return managedEnvironments;
+    get managedOwners() {
+      return managedOwners;
     },
     manage(environmentId: string, ownerEnvironmentId: string) {
-      managedEnvironments = [{ environmentId, owner: { environmentId: ownerEnvironmentId } }];
+      managedOwners = new Map([[environmentId, ownerEnvironmentId]]);
     },
     get openDraftRoute() {
       return openDraftRoute;
@@ -113,7 +113,7 @@ const testState = vi.hoisted(() => {
         environmentSelection: undefined,
       };
       connectedEnvironmentIds = ["environment-primary", "environment-ssh"];
-      managedEnvironments = [];
+      managedOwners = new Map();
       targetSettings = {
         defaultThreadEnvMode: workspaceDefaults.envMode,
         newWorktreesStartFromOrigin: workspaceDefaults.startFromOrigin,
@@ -153,7 +153,7 @@ vi.mock("../rpc/atomRegistry", () => ({
       atom === "connected-environment-ids"
         ? testState.connectedEnvironmentIds
         : atom === "managed-plugin-environments"
-          ? testState.managedEnvironments
+          ? testState.managedOwners
           : testServerConfigs(),
   },
 }));
@@ -239,14 +239,11 @@ vi.mock("@t3tools/client-runtime/state/project-grouping", () => ({
   resolveManagedEnvironmentOwnerProject: (
     project: { environmentId: string },
     projects: { environmentId: string }[],
-    managed: { environmentId: string; owner: { environmentId: string } }[],
-  ) => {
-    const owner = managed.find((resource) => resource.environmentId === project.environmentId);
-    return (
-      projects.find((candidate) => candidate.environmentId === owner?.owner.environmentId) ??
-      project
-    );
-  },
+    managedOwners: ReadonlyMap<string, string>,
+  ) =>
+    projects.find(
+      (candidate) => candidate.environmentId === managedOwners.get(project.environmentId),
+    ) ?? project,
   selectProjectGroupingSettings: () => ({}),
 }));
 vi.mock("../state/entities", () => {
@@ -274,7 +271,7 @@ vi.mock("../state/entities", () => {
 vi.mock("../state/projects", () => ({ defaultProjectFallbackReadyAtom: () => true }));
 vi.mock("../state/olderSettledShelf", () => ({ readUnloadedThreadCount: () => 0 }));
 vi.mock("../state/plugins", () => ({
-  managedPluginEnvironmentsAtom: "managed-plugin-environments",
+  managedEnvironmentOwnersAtom: "managed-plugin-environments",
 }));
 vi.mock("../state/presentation", () => ({
   environmentSummaries: { connectedEnvironmentIdsAtom: "connected-environment-ids" },
@@ -473,6 +470,17 @@ describe("default project selection", () => {
       environmentId: "first",
       projectId: "project",
     });
+    // Right after a reload only the saved connection says the last used project is a sandbox's.
+    expect(
+      resolveDefaultProjectRef(
+        projects,
+        [],
+        "last-used:project",
+        true,
+        {} as never,
+        new Map([["last-used", "first"]]),
+      ),
+    ).toEqual({ environmentId: "first", projectId: "project" });
     expect(
       resolveDefaultProjectRef(
         [projects[0]!, { ...projects[1]!, archivedAt: "2026-11-09T00:00:00.000Z" }],

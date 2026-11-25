@@ -6,7 +6,7 @@ import { useAtomValue } from "@effect/atom-react";
 
 import type { EnvironmentOption } from "../components/BranchToolbar.logic";
 import { useEnvironments } from "../state/environments";
-import { managedPluginEnvironmentIdsAtom } from "../state/plugins";
+import { managedEnvironmentOwnersAtom } from "../state/plugins";
 import { useEnvironmentsWithScope } from "../state/session";
 
 export type AddProjectTarget = Pick<EnvironmentOption, "environmentId" | "label" | "machine">;
@@ -23,7 +23,7 @@ export function useAddProjectTargets(
 ): readonly AddProjectTarget[] {
   const { environments } = useEnvironments();
   const canClone = useEnvironmentsWithScope(environments, AuthSourceControlWriteScope);
-  const managedEnvironmentIds = useAtomValue(managedPluginEnvironmentIdsAtom);
+  const managedOwners = useAtomValue(managedEnvironmentOwnersAtom);
   if (!project?.repositoryIdentity?.locator.remoteUrl) return [];
   const hasProject = new Set([
     project.environmentId,
@@ -33,7 +33,7 @@ export function useAddProjectTargets(
     .filter(
       (environment) =>
         !hasProject.has(environment.environmentId) &&
-        !managedEnvironmentIds.has(environment.environmentId) &&
+        !managedOwners.has(environment.environmentId) &&
         canClone.has(environment.environmentId) &&
         canCreateProjectInEnvironment(environment.connection.phase) &&
         environment.serverConfig !== null,

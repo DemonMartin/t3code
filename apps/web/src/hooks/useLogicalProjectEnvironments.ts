@@ -19,7 +19,7 @@ import {
 } from "@t3tools/client-runtime/state/project-grouping";
 import { useProjects } from "../state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
-import { managedPluginEnvironmentIdsAtom } from "../state/plugins";
+import { managedEnvironmentOwnersAtom } from "../state/plugins";
 import { useClientSettings } from "./useSettings";
 
 export function useLogicalProjectEnvironments(
@@ -30,7 +30,7 @@ export function useLogicalProjectEnvironments(
   const allProjects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
-  const managedEnvironmentIds = useAtomValue(managedPluginEnvironmentIdsAtom);
+  const managedOwners = useAtomValue(managedEnvironmentOwnersAtom);
 
   if (!activeProject) return [];
   const environmentById = new Map(
@@ -78,5 +78,5 @@ export function useLogicalProjectEnvironments(
     if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
     return a.label.localeCompare(b.label);
   });
-  return withoutManagedEnvironments(envs, managedEnvironmentIds, activeProject.environmentId);
+  return withoutManagedEnvironments(envs, managedOwners, activeProject.environmentId);
 }

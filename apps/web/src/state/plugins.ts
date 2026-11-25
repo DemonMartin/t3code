@@ -1,7 +1,11 @@
-import { createPluginSummaryAtoms } from "@t3tools/client-runtime/state/plugins";
+import {
+  createPluginSummaryAtoms,
+  managedEnvironmentOwners,
+} from "@t3tools/client-runtime/state/plugins";
 import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
 
+import { environmentCatalog } from "../connection/catalog";
 import { environmentSummaries } from "./presentation";
 import { serverEnvironment } from "./server";
 
@@ -13,17 +17,19 @@ export const { pluginCatalogsAtom, pluginStatusByEnvironmentAtom, managedPluginE
   });
 
 /**
- * Environments a plugin runs for one thread each; new work is never routed to them. Kept
- * identical while its members are unchanged, so a plugin refresh does not re-render the composer.
+ * The owning environment of every plugin-managed environment. Such an environment runs one
+ * thread, so new work is never routed to it. Saved connections name their owner before any plugin
+ * has answered. Kept identical while unchanged, so a plugin refresh does not re-render the composer.
  */
-export const managedPluginEnvironmentIdsAtom = Atom.make((get): ReadonlySet<string> => {
-  const next = new Set(
-    get(managedPluginEnvironmentsAtom).map((resource) => resource.environmentId),
+export const managedEnvironmentOwnersAtom = Atom.make((get): ReadonlyMap<string, string> => {
+  const next = managedEnvironmentOwners(
+    get(environmentCatalog.catalogValueAtom).entries,
+    get(managedPluginEnvironmentsAtom),
   );
-  const previous = Option.getOrNull(get.self<ReadonlySet<string>>());
+  const previous = Option.getOrNull(get.self<ReadonlyMap<string, string>>());
   return previous !== null &&
     previous.size === next.size &&
-    [...next].every((environmentId) => previous.has(environmentId))
+    [...next].every(([environmentId, owner]) => previous.get(environmentId) === owner)
     ? previous
     : next;
 });

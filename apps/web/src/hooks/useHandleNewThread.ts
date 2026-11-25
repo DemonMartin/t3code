@@ -27,6 +27,7 @@ import {
   getProjectOrderKey,
   resolveGroupDefaultProject,
   resolveManagedEnvironmentOwnerProject,
+  selectNewDraftProject,
   selectProjectGroupingSettings,
   type ProjectGroupingSettings,
 } from "@t3tools/client-runtime/state/project-grouping";
@@ -48,7 +49,7 @@ import {
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { peekT3ProjectFile, readT3ProjectFile } from "../lib/t3ProjectFileDefaults";
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { managedPluginEnvironmentsAtom } from "../state/plugins";
+import { managedEnvironmentOwnersAtom } from "../state/plugins";
 import { environmentSummaries } from "../state/presentation";
 import { environmentServerConfigsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
@@ -128,7 +129,7 @@ function resolveNewDraftProjectRef(
   projectRef: ScopedProjectRef,
   input: {
     readonly projects: ReadonlyArray<EnvironmentProject>;
-    readonly managedEnvironments: Parameters<typeof resolveManagedEnvironmentOwnerProject>[2];
+    readonly managedOwners: ReadonlyMap<string, string>;
     readonly settings: ProjectGroupingSettings;
     readonly keepEnvironment: boolean;
   },
@@ -142,7 +143,7 @@ function resolveNewDraftProjectRef(
   const owner = resolveManagedEnvironmentOwnerProject(
     project,
     input.projects,
-    input.managedEnvironments,
+    input.managedOwners,
     input.settings,
   );
   return owner === project ? projectRef : scopeProjectRef(owner.environmentId, owner.id);
@@ -176,7 +177,7 @@ export function createNewThreadHandler(router: AnyRouter) {
     const projectGroupingSettings = selectProjectGroupingSettings(getClientSettings());
     const projectRef = resolveNewDraftProjectRef(requestedProjectRef, {
       projects,
-      managedEnvironments: appAtomRegistry.get(managedPluginEnvironmentsAtom),
+      managedOwners: appAtomRegistry.get(managedEnvironmentOwnersAtom),
       settings: projectGroupingSettings,
       // An existing worktree is a path on the machine that holds it.
       keepEnvironment: typeof options?.worktreePath === "string",
@@ -508,22 +509,35 @@ export function createNewThreadHandler(router: AnyRouter) {
   };
 }
 
+const NO_MANAGED_ENVIRONMENTS: ReadonlyMap<string, string> = new Map();
+
 export function resolveDefaultProjectRef(
   projects: ReadonlyArray<EnvironmentProject>,
   projectOrder: readonly string[],
   lastUsedProjectKey: string | null,
   fallbackReady = true,
   groupingSettings?: ProjectGroupingSettings,
+  managedOwners = NO_MANAGED_ENVIRONMENTS,
 ): ScopedProjectRef | null {
-  const lastUsed = projects.find(
+  const liveProjects = projects.filter((project) => project.archivedAt == null);
+  const lastUsed = liveProjects.find(
     (project) =>
-      project.archivedAt == null &&
       scopedProjectKey(scopeProjectRef(project.environmentId, project.id)) === lastUsedProjectKey,
   );
-  if (lastUsed) return scopeProjectRef(lastUsed.environmentId, lastUsed.id);
+  if (lastUsed) {
+    // A key saved while viewing a sandbox thread still names the sandbox's project.
+    const owner = groupingSettings
+      ? resolveManagedEnvironmentOwnerProject(
+          lastUsed,
+          liveProjects,
+          managedOwners,
+          groupingSettings,
+        )
+      : lastUsed;
+    return scopeProjectRef(owner.environmentId, owner.id);
+  }
   if (!fallbackReady) return null;
-  const liveProjects = projects.filter((project) => project.archivedAt == null);
-  const [firstProject] = orderItemsByPreferredIds({
+  const ordered = orderItemsByPreferredIds({
     items: liveProjects,
     preferredIds: projectOrder,
     getId: getProjectOrderKey,
@@ -532,6 +546,9 @@ export function resolveDefaultProjectRef(
       legacyProjectCwdPreferenceKey(project.workspaceRoot),
     ],
   });
+  const firstProject =
+    (groupingSettings ? selectNewDraftProject(ordered, managedOwners, groupingSettings) : null) ??
+    ordered[0];
   if (!firstProject) return null;
   const defaultProject = groupingSettings
     ? resolveGroupDefaultProject(firstProject, liveProjects, groupingSettings)
@@ -564,12 +581,14 @@ export function useHandleNewThread() {
   const projects = useProjects();
   const handleNewThread = useNewThreadHandler();
   const groupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const managedOwners = useAtomValue(managedEnvironmentOwnersAtom);
   const defaultProjectRef = resolveDefaultProjectRef(
     projects,
     projectOrder,
     lastUsedProjectKey,
     defaultProjectFallbackReady,
     groupingSettings,
+    managedOwners,
   );
 
   return {

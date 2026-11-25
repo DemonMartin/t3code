@@ -1,6 +1,11 @@
 import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
+import { useAtomValue } from "@effect/atom-react";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import {
+  selectNewDraftProject,
+  selectProjectGroupingSettings,
+} from "@t3tools/client-runtime/state/project-grouping";
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { T, useGT } from "gt-react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
@@ -21,6 +26,8 @@ import {
   useVisibleThreadShells,
 } from "../state/entities";
 import { useEnvironments } from "../state/environments";
+import { managedEnvironmentOwnersAtom } from "../state/plugins";
+import { useClientSettings } from "../hooks/useSettings";
 
 function ChatIndexRouteView() {
   const { authGateState } = Route.useRouteContext();
@@ -45,12 +52,18 @@ function IndexDraftLanding() {
   const startedAttemptRef = useRef<number | null>(null);
   const [startState, setStartState] = useState({ failed: false, retryRequest: 0 });
 
+  const managedOwners = useAtomValue(managedEnvironmentOwnersAtom);
+  const groupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const recentProjects = sortScopedProjectsForSidebar(
+    projects.filter((project) => project.archivedAt == null),
+    threads,
+    "updated_at",
+  );
+  // A sandbox's project stands for its owner's, which can load after it. Once every environment
+  // has answered and no owner has the project, the sandbox's own is all there is.
   const mostRecentProject =
-    sortScopedProjectsForSidebar(
-      projects.filter((project) => project.archivedAt == null),
-      threads,
-      "updated_at",
-    )[0] ?? null;
+    selectNewDraftProject(recentProjects, managedOwners, groupingSettings) ??
+    (bootstrapped ? (recentProjects[0] ?? null) : null);
   const attempt = startState.retryRequest;
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- starts a draft thread in the most recent project and navigates to it while still on the index

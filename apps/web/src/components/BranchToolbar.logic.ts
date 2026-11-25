@@ -42,13 +42,13 @@ export interface EnvironmentOption {
  */
 export function withoutManagedEnvironments<T extends { readonly environmentId: string }>(
   environments: ReadonlyArray<T>,
-  managedEnvironmentIds: ReadonlySet<string>,
+  managedEnvironments: { readonly has: (environmentId: string) => boolean },
   activeEnvironmentId: string,
 ): T[] {
   return environments.filter(
     (environment) =>
       environment.environmentId === activeEnvironmentId ||
-      !managedEnvironmentIds.has(environment.environmentId),
+      !managedEnvironments.has(environment.environmentId),
   );
 }
 
