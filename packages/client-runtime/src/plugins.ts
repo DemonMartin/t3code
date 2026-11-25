@@ -230,16 +230,23 @@ export function pluginThreadDetailsViews(catalog: PluginCatalog) {
     );
 }
 
-/** The thread is added last, so a plugin's own input cannot name another thread. */
+/**
+ * The thread is added last, so a plugin's own input cannot name another thread. A picked
+ * value is sent only when it is one the action offered.
+ */
 export function pluginStatusActionInput(
   action: PluginStatusAction,
   threadId: string,
   destination: string | null,
+  picked?: string,
 ): PluginInput {
   return {
     ...action.input,
     ...(action.environment && destination !== null
       ? { [action.environment.name]: destination }
+      : {}),
+    ...(action.choice?.options.some((option) => option.value === picked) && picked !== undefined
+      ? { [action.choice.name]: picked }
       : {}),
     threadId,
   };

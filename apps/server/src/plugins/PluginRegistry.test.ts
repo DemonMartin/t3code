@@ -56,6 +56,20 @@ const status = {
   label: "Paused",
   actions: [
     {
+      id: "idle",
+      label: "Idle stop",
+      command: "change",
+      input: {},
+      choice: {
+        name: "seconds",
+        value: "600",
+        options: [
+          { label: "10 min", value: "600" },
+          { label: "1 h", value: "3600" },
+        ],
+      },
+    },
+    {
       id: "move",
       label: "Move",
       command: "change",

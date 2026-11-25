@@ -158,6 +158,30 @@ describe("thread details actions", () => {
       threadId: "pressed-thread",
     });
   });
+  it("sends the value picked from an action's list, and only one the action offered", () => {
+    const idle = {
+      id: "idle",
+      label: "Idle stop",
+      command: "idle",
+      input: { seconds: "600", threadId: "another-thread" },
+      choice: {
+        name: "seconds",
+        value: "600",
+        options: [
+          { label: "10 min", value: "600" },
+          { label: "1 h", value: "3600" },
+        ],
+      },
+    };
+    expect(pluginStatusActionInput(idle, "pressed-thread", null, "3600")).toEqual({
+      seconds: "3600",
+      threadId: "pressed-thread",
+    });
+    expect(pluginStatusActionInput(idle, "pressed-thread", null, "86400")).toEqual({
+      seconds: "600",
+      threadId: "pressed-thread",
+    });
+  });
   it("offers only other environments where the plugin is running", () => {
     expect(
       pluginActionDestinations(

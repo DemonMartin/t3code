@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 import { PluginView, PluginViewDescriptor } from "./index.ts";
 
 const valid = Schema.is(PluginView);
+const decodeView = Schema.decodeUnknownSync(PluginView);
 it("rejects ambiguous form and table identities before clients render them", () => {
   const form = {
     id: "settings",
@@ -151,4 +152,29 @@ it("lets a stopped managed environment name the action that starts it again", ()
   expect(valid({ title: "Environments", blocks: [{ ...environment, resume: "state" }] })).toBe(
     false,
   );
+});
+
+it("lets a status action offer a list whose current value is one of its options", () => {
+  const options = [
+    { label: "10 min", value: "600" },
+    { label: "1 h", value: "3600" },
+  ];
+  const status = (choice: unknown) => ({
+    title: "Thread",
+    blocks: [
+      {
+        id: "state",
+        kind: "status",
+        label: "Sandbox running",
+        actions: [{ id: "idle", label: "Idle stop", command: "idle", input: {}, choice }],
+      },
+    ],
+  });
+  const choice = { name: "seconds", value: "600", options };
+  expect(decodeView(status(choice)).blocks[0]).toMatchObject({
+    actions: [{ choice }],
+  });
+  expect(valid(status({ ...choice, value: "86400" }))).toBe(false);
+  expect(valid(status({ ...choice, options: [...options, options[0]] }))).toBe(false);
+  expect(valid(status({ ...choice, name: "Not An Id" }))).toBe(false);
 });

@@ -62,6 +62,17 @@ export const PluginStatusAction = Schema.Struct({
   confirm: Schema.optionalKey(Text),
   /** Ask for another connected environment running this plugin; its id is sent under `name`. */
   environment: Schema.optionalKey(Schema.Struct({ name: PluginLocalId, label: Label })),
+  /** Offer a list instead of a button; the picked value is sent under `name`. */
+  choice: Schema.optionalKey(
+    Schema.Struct({
+      name: PluginLocalId,
+      /** The current value; must be one of the options. */
+      value: Label,
+      options: Schema.Array(Schema.Struct({ label: Label, value: Label })).check(
+        Schema.isMaxLength(20),
+      ),
+    }),
+  ),
 });
 export type PluginStatusAction = typeof PluginStatusAction.Type;
 export const PluginField = Schema.Struct({
@@ -233,8 +244,17 @@ export const PluginView = Schema.Struct({
               unique(field.options?.map((option) => option.value) ?? []),
             )
           );
-        if (block.kind === "actions" || block.kind === "status")
-          return unique(block.actions.map((action) => action.id));
+        if (block.kind === "actions") return unique(block.actions.map((action) => action.id));
+        if (block.kind === "status")
+          return (
+            unique(block.actions.map((action) => action.id)) &&
+            block.actions.every(
+              ({ choice }) =>
+                choice === undefined ||
+                (unique(choice.options.map((option) => option.value)) &&
+                  choice.options.some((option) => option.value === choice.value)),
+            )
+          );
         if (block.kind === "table")
           return (
             unique(block.columns) &&

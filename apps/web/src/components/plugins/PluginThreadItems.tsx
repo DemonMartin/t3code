@@ -14,6 +14,7 @@ import {
   type PluginStatusAction,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
+import { ChevronDownIcon } from "lucide-react";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
 import { useId, useState } from "react";
@@ -22,7 +23,7 @@ import { cn } from "../../lib/utils";
 import { useEnvironmentMachines, useEnvironments } from "../../state/environments";
 import { pluginCatalogsAtom } from "../../state/plugins";
 import { serverEnvironment } from "../../state/server";
-import { ThreadDetailsControl } from "../chat/ThreadDetailsControl";
+import { ThreadDetailsControl, ThreadDetailsSelectControl } from "../chat/ThreadDetailsControl";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { Button } from "../ui/button";
 import {
@@ -156,7 +157,15 @@ function PluginThreadView({
         environmentId={environmentId}
         plugin={plugin}
         busy={busy}
-        onPress={(action) => openPluginAction({ environmentId, threadId, plugin, action })}
+        onPress={(action, choice) =>
+          openPluginAction({
+            environmentId,
+            threadId,
+            plugin,
+            action,
+            ...(choice === undefined ? {} : { choice }),
+          })
+        }
       />
     ) : null,
   );
@@ -173,7 +182,7 @@ function PluginStatusItem({
   environmentId: EnvironmentId;
   plugin: Entry;
   busy: boolean;
-  onPress: (action: PluginStatusAction) => void;
+  onPress: (action: PluginStatusAction, choice?: string) => void;
 }) {
   const label =
     block.label === undefined ? null : (
@@ -222,7 +231,7 @@ function PluginStatusActionButton({
   environmentId: EnvironmentId;
   plugin: Entry;
   busy: boolean;
-  onPress: (action: PluginStatusAction) => void;
+  onPress: (action: PluginStatusAction, choice?: string) => void;
 }) {
   const command = plugin.commands.find((candidate) => candidate.id === action.command);
   const catalogs = useAtomValue(pluginCatalogsAtom);
@@ -240,12 +249,40 @@ function PluginStatusActionButton({
     pluginActionDestinations(catalogs, environmentId, plugin.id).length === 0
   )
     return null;
+  const disabled = !command || !allowed || busy;
+  const { choice } = action;
+  if (choice !== undefined) {
+    const current = choice.options.find((option) => option.value === choice.value);
+    return (
+      <Select
+        value={choice.value}
+        disabled={disabled}
+        items={choice.options}
+        // The list shows the plugin's value: a pick runs the command, whose result refreshes it.
+        onValueChange={(value) => {
+          if (value !== null && value !== choice.value) onPress(action, value);
+        }}
+      >
+        <ThreadDetailsSelectControl size="xs" variant="ghost" part="meta" aria-label={action.label}>
+          {`${action.label}: ${current?.label ?? choice.value}`}
+          <ChevronDownIcon aria-hidden className="size-3 opacity-70" />
+        </ThreadDetailsSelectControl>
+        <SelectPopup alignItemWithTrigger={false}>
+          {choice.options.map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectPopup>
+      </Select>
+    );
+  }
   return (
     <ThreadDetailsControl
       size="xs"
       variant="ghost"
       part="meta"
-      disabled={!command || !allowed || busy}
+      disabled={disabled}
       onClick={() => onPress(action)}
     >
       {action.label}

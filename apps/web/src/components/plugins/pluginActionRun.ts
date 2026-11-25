@@ -31,6 +31,8 @@ export interface PluginActionRun {
   readonly threadId: ThreadId;
   readonly plugin: Entry;
   readonly action: PluginStatusAction;
+  /** The value picked from the action's list, when it offers one. */
+  readonly choice?: string;
   readonly phase: "ask" | "running" | "done";
   readonly notice: PluginNoticeResult | null;
   /** Progress reported by a relayed step. */
@@ -99,7 +101,7 @@ export function startPluginAction(destination: EnvironmentId | null) {
     start: {
       environmentId: run.environmentId,
       commandId: run.action.command,
-      input: pluginStatusActionInput(run.action, run.threadId, destination),
+      input: pluginStatusActionInput(run.action, run.threadId, destination, run.choice),
     },
     execute: (step) => execute(running, step),
     signal: controller.signal,
@@ -122,6 +124,7 @@ export function openPluginAction(request: {
   readonly threadId: ThreadId;
   readonly plugin: Entry;
   readonly action: PluginStatusAction;
+  readonly choice?: string;
 }) {
   if (usePluginActionRun.getState().run?.phase === "running") return;
   const asks = request.action.confirm !== undefined || request.action.environment !== undefined;
