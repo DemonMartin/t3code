@@ -2,21 +2,23 @@ import { useAtomValue } from "@effect/atom-react";
 import {
   pluginAutoLauncher,
   pluginEnvironmentLaunchResult,
+  pluginLaunchDestination,
   type PluginAutoLauncher,
 } from "@t3tools/client-runtime/plugins";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId, PluginInput, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, type PluginInput, ThreadId } from "@t3tools/contracts";
+import { useRouter } from "@tanstack/react-router";
 import { Atom } from "effect/reactivity";
 import { msg } from "gt-react";
-import { useState } from "react";
 
 import { m } from "~/i18n/messages";
 import { randomUUID } from "~/lib/utils";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
-import { pluginCatalogsAtom } from "../../state/plugins";
+import { environmentCatalog } from "../../connection/catalog";
+import { managedPluginEnvironmentsAtom, pluginCatalogsAtom } from "../../state/plugins";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -62,11 +64,74 @@ export function usePluginAutoLauncher(input: {
   };
 }
 
+/** A first send a plugin took, until its thread exists or the plugin drops the launch. */
 export interface PluginAutoLaunch {
   readonly environmentId: EnvironmentId;
   readonly pluginId: string;
   readonly viewId: string;
-  readonly context: PluginInput;
+  readonly title: string;
+  readonly context: PluginInput & { readonly message: string; readonly requestId: string };
+  readonly startedAt: string;
+}
+
+// By the draft thread that sent them. In memory only: a reload forgets the launch's progress,
+// and its thread still shows up in the sidebar.
+const pluginLaunchesAtom = Atom.make<ReadonlyMap<ThreadId, PluginAutoLaunch>>(
+  new Map<ThreadId, PluginAutoLaunch>(),
+).pipe(Atom.keepAlive);
+const launchWatches = new Map<string, () => void>();
+
+export function usePluginLaunch(threadId: ThreadId): PluginAutoLaunch | null {
+  return useAtomValue(pluginLaunchesAtom).get(threadId) ?? null;
+}
+
+export function endPluginLaunch(threadId: ThreadId, requestId: string) {
+  launchWatches.get(requestId)?.();
+  launchWatches.delete(requestId);
+  appAtomRegistry.update(pluginLaunchesAtom, (current) => {
+    if (current.get(threadId)?.context.requestId !== requestId) return current;
+    const next = new Map(current);
+    next.delete(threadId);
+    return next;
+  });
+}
+
+/**
+ * Watched outside any component: the launch outlives the draft's view, and whether to open its
+ * thread depends on where the user is at the moment it is ready.
+ */
+function beginPluginLaunch(
+  threadId: ThreadId,
+  launch: PluginAutoLaunch,
+  /** Resolves once the user is where the started thread takes them, if anywhere. */
+  onStarted: (destination: {
+    readonly environmentId: string;
+    readonly threadId: string;
+  }) => Promise<void>,
+) {
+  const { requestId } = launch.context;
+  appAtomRegistry.update(pluginLaunchesAtom, (current) => new Map(current).set(threadId, launch));
+  const destinationAtom = Atom.make((get) =>
+    pluginLaunchDestination(
+      get(managedPluginEnvironmentsAtom),
+      (environmentId) =>
+        get(environmentCatalog.catalogValueAtom).entries.has(EnvironmentId.make(environmentId)),
+      { environmentId: launch.environmentId, pluginId: launch.pluginId, requestId },
+    ),
+  );
+  let ended = false;
+  const stop = appAtomRegistry.subscribe(
+    destinationAtom,
+    (destination) => {
+      if (destination === null || ended) return;
+      ended = true;
+      // The draft keeps showing the launch until its thread is on screen, not an empty composer.
+      void onStarted(destination).finally(() => endPluginLaunch(threadId, requestId));
+    },
+    { immediate: true },
+  );
+  if (ended) stop();
+  else launchWatches.set(requestId, stop);
 }
 
 /**
@@ -75,13 +140,14 @@ export interface PluginAutoLaunch {
  */
 export function usePluginAutoLaunchSend(sendInFlightRef: { current: boolean }) {
   const execute = useAtomCommand(serverEnvironment.executePluginCommand, { reportFailure: false });
-  const [launch, setLaunch] = useState<PluginAutoLaunch | null>(null);
+  const router = useRouter();
 
   /**
    * Null when this send is not the launcher's to take. Otherwise resolves true when it must not
    * go out locally: the plugin took it, or its command failed.
    */
-  const claimSend = (send: {
+  return (send: {
+    readonly threadId: ThreadId;
     readonly environmentId: EnvironmentId;
     readonly launcher: PluginAutoLauncher;
     readonly context: PluginInput & { readonly message: string; readonly hasAttachments: boolean };
@@ -90,13 +156,14 @@ export function usePluginAutoLaunchSend(sendInFlightRef: { current: boolean }) {
     readonly isCurrent: () => boolean;
     readonly onClaimed: (context: PluginInput) => void;
   }): Promise<boolean> | null => {
-    const { environmentId, launcher } = send;
+    const { environmentId, launcher, threadId } = send;
     if (
       sendInFlightRef.current ||
       !launcherCarriesSend({ ...send.context, multipleModels: send.multipleModels })
     )
       return null;
     const context = { ...send.context, requestId: randomUUID() };
+    const draftPath = router.state.location.pathname;
     sendInFlightRef.current = true;
     return execute({
       environmentId,
@@ -131,16 +198,29 @@ export function usePluginAutoLaunchSend(sendInFlightRef: { current: boolean }) {
         if (pluginEnvironmentLaunchResult(outcome.value)?.requestId !== context.requestId)
           return !send.isCurrent();
         send.onClaimed(context);
-        if (send.isCurrent())
-          setLaunch({
+        beginPluginLaunch(
+          threadId,
+          {
             environmentId,
             pluginId: launcher.pluginId,
             viewId: launcher.viewId,
+            title: launcher.title,
             context,
-          });
+            startedAt: new Date().toISOString(),
+          },
+          async (destination) => {
+            // The thread shows up in the sidebar either way; it only opens for a user still waiting.
+            if (router.state.location.pathname !== draftPath) return;
+            await router.navigate({
+              to: "/$environmentId/$threadId",
+              params: {
+                environmentId: EnvironmentId.make(destination.environmentId),
+                threadId: ThreadId.make(destination.threadId),
+              },
+            });
+          },
+        );
         return true;
       });
   };
-
-  return { claimSend, launch, closeLaunch: () => setLaunch(null) };
 }

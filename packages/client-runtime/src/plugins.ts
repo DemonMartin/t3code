@@ -1,10 +1,12 @@
 import { mFallback, msg } from "gt-i18n";
 import type { MFunctionType } from "gt-i18n/types";
 import type {
+  PluginAction,
   PluginBlock,
   PluginInput,
   PluginCatalog,
   PluginStatusAction,
+  PluginView,
 } from "@t3tools/contracts";
 import {
   PluginEnvironmentLaunchResult,
@@ -128,6 +130,92 @@ export function pluginAutoLauncher(
       (launcher): launcher is PluginAutoLauncher => launcher.autoLaunch !== null,
     ) ?? null
   );
+}
+
+/** The thread a launch started, once its environment runs and this client is connected to it. */
+export function pluginLaunchDestination(
+  resources: ReadonlyArray<{
+    readonly owner: { readonly environmentId: string; readonly pluginId: string };
+    readonly environmentId: string;
+    readonly launchRequestId?: string | undefined;
+    readonly state: string;
+    readonly threadId?: string | undefined;
+  }>,
+  isConnected: (environmentId: string) => boolean,
+  launch: {
+    readonly environmentId: string;
+    readonly pluginId: string;
+    readonly requestId: unknown;
+  },
+): { readonly environmentId: string; readonly threadId: string } | null {
+  for (const resource of resources) {
+    if (
+      resource.owner.environmentId === launch.environmentId &&
+      resource.owner.pluginId === launch.pluginId &&
+      resource.launchRequestId === launch.requestId &&
+      resource.state === "running" &&
+      resource.threadId &&
+      isConnected(resource.environmentId)
+    )
+      return { environmentId: resource.environmentId, threadId: resource.threadId };
+  }
+  return null;
+}
+
+export interface PluginLaunchStep {
+  readonly id: string;
+  readonly label: string;
+  readonly detail: string | null;
+  readonly status: "done" | "running" | "pending" | "failed";
+}
+const LAUNCH_STEP_STATUS = {
+  success: "done",
+  warning: "running",
+  muted: "pending",
+  danger: "failed",
+} as const;
+
+/**
+ * What a launcher view says about a launch in flight. Each status block is a step, its tone the
+ * step's state, and the actions are the launch's controls. A launcher that predates steps shows
+ * text only, which becomes one step. A view with neither, or with a form, is asking how to
+ * launch: this launch no longer exists.
+ */
+export function pluginLaunchProgress(view: PluginView | null): {
+  readonly withdrawn: boolean;
+  readonly steps: ReadonlyArray<PluginLaunchStep>;
+  readonly actions: ReadonlyArray<PluginAction>;
+} {
+  if (view === null) return { withdrawn: false, steps: [], actions: [] };
+  const actions = view.blocks.flatMap((block) => (block.kind === "actions" ? block.actions : []));
+  const steps = view.blocks.flatMap((block): PluginLaunchStep[] =>
+    block.kind === "status" && block.label !== undefined
+      ? [
+          {
+            id: block.id,
+            label: block.label,
+            detail: block.detail ?? null,
+            status: LAUNCH_STEP_STATUS[block.tone ?? "muted"],
+          },
+        ]
+      : [],
+  );
+  if (steps.length > 0) return { withdrawn: false, steps, actions };
+  const text = view.blocks.flatMap((block) => (block.kind === "text" ? [block.text] : []));
+  if (text.length === 0 || view.blocks.some((block) => block.kind === "form"))
+    return { withdrawn: true, steps: [], actions: [] };
+  return {
+    withdrawn: false,
+    steps: [
+      {
+        id: "launch",
+        label: text.join(" · "),
+        detail: null,
+        status: actions.some((action) => action.id === "retry") ? "failed" : "running",
+      },
+    ],
+    actions,
+  };
 }
 
 export type PluginStatus = Extract<PluginBlock, { readonly kind: "status" }>;

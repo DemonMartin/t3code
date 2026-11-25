@@ -14,6 +14,8 @@ import {
   pluginThreadPanels,
   pluginAutoLauncher,
   pluginEnvironmentLaunchers,
+  pluginLaunchDestination,
+  pluginLaunchProgress,
   type PluginForm,
 } from "./plugins.ts";
 
@@ -352,4 +354,81 @@ it("starts new drafts through the launcher whose auto-launch command its plugin 
     pluginAutoLauncher({ ...catalog, plugins: [{ ...plugin, views: plugin.views.slice(0, 2) }] }),
   ).toBeNull();
   expect(pluginAutoLauncher(null)).toBeNull();
+});
+
+it("opens a launch's thread only once its environment runs and is connected", () => {
+  const launch = { environmentId: "controller", pluginId: "sandboxes", requestId: "request" };
+  const resource = {
+    owner: { environmentId: "controller", pluginId: "sandboxes" },
+    environmentId: "sandbox",
+    launchRequestId: "request",
+    state: "running",
+    threadId: "thread",
+  };
+  const destination = (
+    resources: Parameters<typeof pluginLaunchDestination>[0],
+    connected = ["sandbox"],
+  ) => pluginLaunchDestination(resources, (id) => connected.includes(id), launch);
+
+  expect(destination([resource])).toEqual({ environmentId: "sandbox", threadId: "thread" });
+  expect(destination([resource], [])).toBeNull();
+  expect(destination([{ ...resource, state: "starting" }])).toBeNull();
+  expect(destination([{ ...resource, threadId: undefined }])).toBeNull();
+  expect(destination([{ ...resource, launchRequestId: "another" }])).toBeNull();
+  expect(
+    destination([{ ...resource, owner: { environmentId: "controller", pluginId: "other" } }]),
+  ).toBeNull();
+});
+
+it("reads a launch's steps and controls from its launcher view", () => {
+  const cancel = { id: "cancel", label: "Cancel provisioning", command: "cancel", input: {} };
+  const retry = { id: "retry", label: "Retry", command: "state", input: {} };
+  const step = (id: string, tone: "success" | "warning" | "muted" | "danger", detail?: string) => ({
+    id,
+    kind: "status" as const,
+    tone,
+    label: id,
+    ...(detail === undefined ? {} : { detail }),
+    actions: [],
+  });
+  const view = (blocks: NonNullable<Parameters<typeof pluginLaunchProgress>[0]>["blocks"]) =>
+    pluginLaunchProgress({ title: "New sandbox", blocks });
+
+  expect(
+    view([
+      step("start", "success"),
+      step("prepare", "warning", "pulling image"),
+      step("agent", "muted"),
+      { id: "control", kind: "actions", actions: [cancel] },
+    ]),
+  ).toEqual({
+    withdrawn: false,
+    steps: [
+      { id: "start", label: "start", detail: null, status: "done" },
+      { id: "prepare", label: "prepare", detail: "pulling image", status: "running" },
+      { id: "agent", label: "agent", detail: null, status: "pending" },
+    ],
+    actions: [cancel],
+  });
+  expect(view([step("start", "danger", "image not found")]).steps[0]?.status).toBe("failed");
+
+  // A launcher that predates steps reports one line of text, and offers retry once it stopped.
+  const text = { id: "progress", kind: "text" as const, text: "starting: pulling image" };
+  expect(view([text, { id: "control", kind: "actions", actions: [cancel] }]).steps).toEqual([
+    { id: "launch", label: "starting: pulling image", detail: null, status: "running" },
+  ]);
+  expect(view([text, { id: "control", kind: "actions", actions: [retry] }]).steps[0]?.status).toBe(
+    "failed",
+  );
+
+  // Without the launch the view falls back to its form: the launch was cancelled or deleted.
+  expect(
+    view([
+      { id: "scope", kind: "text", text: "Starts from a pushed commit." },
+      { id: "launch", kind: "form", label: "Start", command: "launch", fields: [], input: {} },
+    ]).withdrawn,
+  ).toBe(true);
+  expect(view([]).withdrawn).toBe(true);
+  // A view still loading says nothing either way.
+  expect(pluginLaunchProgress(null)).toEqual({ withdrawn: false, steps: [], actions: [] });
 });

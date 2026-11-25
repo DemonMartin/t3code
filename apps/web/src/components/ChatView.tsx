@@ -1,6 +1,6 @@
 import { m } from "../i18n/messages";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
-import { useGT, useMessages } from "gt-react";
+import { msg, useGT, useMessages } from "gt-react";
 import { ChildThreadApprovals } from "./chat/ChildThreadApprovals";
 import { draftSupportedRuntimeModes } from "./chat/runtimeModeConfig";
 import { workspaceAreaProps } from "../lib/workspaceFocus";
@@ -81,7 +81,7 @@ import {
   type ResponseContextRecord,
   type ChatFileAttachment,
   type EnvironmentId,
-  type MessageId,
+  MessageId,
   type ModelSelection,
   type PluginInput,
   type PreviewAnnotationPayload,
@@ -220,7 +220,7 @@ import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import { shortcutLabelForCommand } from "../keybindings";
 import { cn } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
-import { toastManager } from "./ui/toast";
+import { stackedThreadToast, toastManager } from "./ui/toast";
 import { projectScriptIdFromCommand } from "~/projectScripts";
 import { newMessageId } from "~/lib/utils";
 import {
@@ -404,8 +404,13 @@ import { ThreadVisitWatermark } from "./chat/ThreadVisitWatermark";
 import { ChatTerminalDrawers } from "./chat/ChatTerminalDrawers";
 import { ChatRightPanel } from "./chat/ChatRightPanel";
 import { useDraftEnvironmentRouting } from "./chat/useDraftEnvironmentRouting";
-import { usePluginAutoLauncher, usePluginAutoLaunchSend } from "./chat/usePluginAutoLaunch";
-import { PluginEnvironmentLaunchDialog } from "./plugins/PluginEnvironmentLaunchDialog";
+import {
+  endPluginLaunch,
+  usePluginAutoLauncher,
+  usePluginAutoLaunchSend,
+  usePluginLaunch,
+} from "./chat/usePluginAutoLaunch";
+import { PluginLaunchSteps } from "./plugins/PluginLaunchSteps";
 import { branchMismatchBannerItem, extensionStatusBannerItem } from "./chat/ThreadActivityBanners";
 import { ThreadNow } from "./chat/ThreadNow";
 import { threadRuntimeIsActive, type ThreadStructure } from "@t3tools/client-runtime/state/shell";
@@ -1701,7 +1706,25 @@ export default function ChatView(props: ChatViewProps) {
     ...timelineEntriesInput,
     visibleTurnItems: serverTimelineRows,
   });
-  const draftTimelineEntries = optimisticUserMessages.map(
+  // A first send a plugin took reads as sent: the launch's steps follow it in the footer.
+  const pluginLaunch = usePluginLaunch(threadId);
+  const pluginLaunchMessage: ChatMessage | null =
+    pluginLaunch === null
+      ? null
+      : {
+          id: MessageId.make(`plugin-launch:${pluginLaunch.context.requestId}`),
+          role: "user",
+          text: pluginLaunch.context.message,
+          runId: null,
+          createdAt: pluginLaunch.startedAt,
+          updatedAt: pluginLaunch.startedAt,
+          streaming: false,
+        };
+  const draftTimelineEntries = (
+    pluginLaunchMessage === null
+      ? optimisticUserMessages
+      : [...optimisticUserMessages, pluginLaunchMessage]
+  ).map(
     (message) =>
       ({
         id: message.id,
@@ -3247,19 +3270,44 @@ export default function ChatView(props: ChatViewProps) {
     if (store.getComposerDraft(composerDraftTarget)?.prompt === input.message)
       store.setPrompt(composerDraftTarget, "");
   };
-  const pluginAutoLaunchSend = usePluginAutoLaunchSend(sendInFlightRef);
+  const onPluginLaunchWithdrawn = () => {
+    if (pluginLaunch === null) return;
+    endPluginLaunch(threadId, pluginLaunch.context.requestId);
+    // Nothing started, so the message goes back above whatever was typed since.
+    const store = useComposerDraftStore.getState();
+    const typed = store.getComposerDraft(composerDraftTarget)?.prompt ?? "";
+    const { message } = pluginLaunch.context;
+    store.setPrompt(composerDraftTarget, typed.trim() === "" ? message : `${message}\n\n${typed}`);
+  };
+  const onPluginLaunchWithdrawnStable = useStableCallback(onPluginLaunchWithdrawn);
+  const claimPluginAutoLaunch = usePluginAutoLaunchSend(sendInFlightRef);
   const onSendLatest = useStableCallback(onSend);
   const onComposerSend = (...args: Parameters<typeof onSend>) => {
+    if (pluginLaunch !== null) {
+      // One draft starts one thread: its launch is still under way.
+      args[0]?.preventDefault();
+      toastManager.add(
+        stackedThreadToast({
+          type: "info",
+          title: m(msg("Still sending your previous message.")),
+          description: m(msg("Send again once it goes through or fails.")),
+        }),
+      );
+      return;
+    }
     // A direct annotation or a detached dictation carries content the draft does not hold.
     const claim =
       pluginAutoLaunch?.active && args[3] === undefined && args[4] === undefined && activeProject
-        ? pluginAutoLaunchSend.claimSend({
+        ? claimPluginAutoLaunch({
+            threadId,
             environmentId: pluginAutoLaunchEnvironmentId,
             launcher: pluginAutoLaunch.launcher,
             context: {
               ...pluginLaunchContext(),
               projectDirectory: activeProject.workspaceRoot,
               projectTitle: activeProject.title,
+              // Also the base of a new worktree, which this machine's checkout does not show.
+              ...(activeThreadBranch ? { branch: activeThreadBranch } : {}),
             },
             multipleModels: multipleModelSelections !== null,
             isCurrent: () => currentRouteThreadKeyRef.current === routeThreadKey,
@@ -3410,6 +3458,7 @@ export default function ChatView(props: ChatViewProps) {
   // its lifecycle status, guest messages awaiting you, then your queued messages.
   const timelineFooter =
     pendingHandoff === null &&
+    pluginLaunch === null &&
     !hasThreadNow &&
     threadStatusLine === null &&
     pendingGuestMessageCount === 0 &&
@@ -3422,6 +3471,15 @@ export default function ChatView(props: ChatViewProps) {
               endpoints={pendingHandoff}
               providers={providerStatuses}
               pending
+            />
+          </div>
+        )}
+        {pluginLaunch === null ? null : (
+          <div className="chat-content-lane pb-2">
+            <PluginLaunchSteps
+              key={pluginLaunch.context.requestId}
+              launch={pluginLaunch}
+              onWithdrawn={onPluginLaunchWithdrawnStable}
             />
           </div>
         )}
@@ -4163,13 +4221,6 @@ export default function ChatView(props: ChatViewProps) {
                 key={`${activeThreadKey}:${previewMiniPlayerSourceKey(shownPreviewMiniPlayer.source)}`}
                 threadRef={activeThreadRef}
                 miniPlayer={shownPreviewMiniPlayer}
-              />
-            ) : null}
-
-            {pluginAutoLaunchSend.launch ? (
-              <PluginEnvironmentLaunchDialog
-                {...pluginAutoLaunchSend.launch}
-                onClose={pluginAutoLaunchSend.closeLaunch}
               />
             ) : null}
 

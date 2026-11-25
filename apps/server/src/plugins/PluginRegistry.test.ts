@@ -324,6 +324,13 @@ it.effect("filters and authorizes views and rejects malformed view output", () =
                   ],
                 }),
             })),
+            {
+              id: "launching",
+              title: "Launching",
+              location: "environment-launcher" as const,
+              permission: "environment:maintain" as const,
+              read: () => Effect.succeed({ title: "Launching", blocks: [status] }),
+            },
             ...(["thread-details", "usage"] as const).map((location) => ({
               id: location,
               title: "Row",
@@ -356,7 +363,11 @@ it.effect("filters and authorizes views and rejects malformed view output", () =
           .readView({ ...row, viewId: "environment-launcher" }, AuthStandardClientScopes)
           .pipe(Effect.flip))._tag,
       ).toBe("PluginOperationError");
-      // A status block is only drawn by the thread details row.
+      // A launcher reports the steps of a launch in flight as status blocks.
+      expect(
+        (yield* host.readView({ ...row, viewId: "launching" }, AuthStandardClientScopes)).blocks,
+      ).toEqual([status]);
+      // Elsewhere a status block is only drawn by the thread details row.
       expect(
         (yield* host
           .readView({ ...row, viewId: "usage" }, ["orchestration:read"])

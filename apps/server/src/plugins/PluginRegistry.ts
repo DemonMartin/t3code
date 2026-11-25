@@ -615,12 +615,15 @@ const make = Effect.gen(function* () {
         "view",
         Effect.suspend(() => view.read(input.context)).pipe(
           Effect.flatMap(decodeView),
-          // Each machine-readable location accepts only its matching block kind.
+          // Each machine-readable location accepts only its matching block kind. A launcher
+          // also reports the steps of a launch in flight as status blocks.
           Effect.filterOrFail(
             (content) =>
               content.blocks.every(
                 (block) =>
-                  (block.kind === "status") === (view.location === "thread-details") &&
+                  (block.kind === "status"
+                    ? view.location === "thread-details" || view.location === "environment-launcher"
+                    : view.location !== "thread-details") &&
                   (block.kind === "environment") === (view.location === "managed-environments"),
               ),
             () => new PluginError({ operation: "view-location", cause: null }),
