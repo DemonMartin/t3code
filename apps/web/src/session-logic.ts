@@ -725,7 +725,11 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
       continue;
     }
 
-    if (STANDALONE_V2_ITEM_TYPES.has(item.type)) {
+    if (
+      STANDALONE_V2_ITEM_TYPES.has(item.type) ||
+      // A changed environment setting reads as a line between turns, like a model change.
+      (item.type === "system_notice" && item.about === "environment")
+    ) {
       entries.push({
         id: item.id,
         kind: "event",

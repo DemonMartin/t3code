@@ -1,7 +1,10 @@
 import { T } from "gt-react";
 import { useAtomValue } from "@effect/atom-react";
 import { EnvironmentId, ThreadId, type PluginInput } from "@t3tools/contracts";
-import { pluginEnvironmentLaunchResult } from "@t3tools/client-runtime/plugins";
+import {
+  pluginEnvironmentLaunchResult,
+  pluginLaunchDestination,
+} from "@t3tools/client-runtime/plugins";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
 import { environmentCatalog } from "../../connection/catalog";
@@ -21,22 +24,18 @@ export function PluginEnvironmentLaunchDialog(props: {
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const navigate = useNavigate();
   const opened = useRef(false);
-  const destination = resources.find(
-    (resource) =>
-      resource.owner.environmentId === props.environmentId &&
-      resource.owner.pluginId === props.pluginId &&
-      resource.launchRequestId === props.context.requestId &&
-      resource.state === "running" &&
-      resource.threadId,
+  const destination = pluginLaunchDestination(
+    resources,
+    (environmentId) => catalog.entries.has(EnvironmentId.make(environmentId)),
+    {
+      environmentId: props.environmentId,
+      pluginId: props.pluginId,
+      requestId: props.context.requestId,
+    },
   );
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Opens the controller-created thread only after its connection has been registered locally.
   useEffect(() => {
-    if (
-      opened.current ||
-      !destination?.threadId ||
-      !catalog.entries.has(EnvironmentId.make(destination.environmentId))
-    )
-      return;
+    if (opened.current || destination === null) return;
     opened.current = true;
     props.onClose();
     void navigate({
@@ -46,7 +45,7 @@ export function PluginEnvironmentLaunchDialog(props: {
         threadId: ThreadId.make(destination.threadId),
       },
     });
-  }, [destination, catalog, navigate, props]);
+  }, [destination, navigate, props]);
   return (
     <Dialog
       open

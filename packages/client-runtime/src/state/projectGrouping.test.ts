@@ -9,7 +9,9 @@ import {
   pickableProjectGroups,
   derivePhysicalProjectKey,
   resolveGroupDefaultProject,
+  resolveManagedEnvironmentOwnerProject,
   resolveScratchProjectScopeKey,
+  selectNewDraftProject,
   sortProjectsByGroupOrder,
   type ProjectGroupingSettings,
 } from "./projectGrouping.ts";
@@ -312,6 +314,48 @@ describe("buildProjectGroups", () => {
       "remote-root",
     );
     expect(resolveGroupDefaultProject(archivedTool, all, settings("separate")).id).toBe("old-tool");
+  });
+
+  it("starts new work from a plugin-managed environment on the environment that owns it", () => {
+    const sandboxEnvironmentId = EnvironmentId.make("sandbox");
+    const local = { ...repositoryIdentity, rootPath: "/work/t3code" };
+    const app = makeProject("app", "/work/t3code/apps/web", { repositoryIdentity: local });
+    const root = makeProject("root", "/work/t3code", { repositoryIdentity: local });
+    const other = makeProject("other", "/work/other", { repositoryIdentity: null });
+    const sandbox = makeProject("sandbox-clone", "/workspace/t3code", {
+      environmentId: sandboxEnvironmentId,
+      repositoryIdentity: { ...repositoryIdentity, rootPath: "/workspace/t3code" },
+    });
+    const sandboxOther = makeProject("sandbox-other", "/workspace/unrelated", {
+      environmentId: sandboxEnvironmentId,
+      repositoryIdentity: null,
+    });
+    const managed = new Map([["sandbox", "environment"]]);
+    const ownerOf = (
+      project: EnvironmentProject,
+      projects: ReadonlyArray<EnvironmentProject>,
+      resources = managed,
+    ) =>
+      resolveManagedEnvironmentOwnerProject(project, projects, resources, settings("repository"))
+        .id;
+
+    const all = [app, root, other, sandbox, sandboxOther];
+    expect(ownerOf(sandbox, all)).toBe("root");
+    expect(ownerOf(sandbox, [app, other, sandbox])).toBe("app");
+    expect(
+      ownerOf(sandbox, [app, { ...root, archivedAt: "2026-07-02T00:00:00.000Z" }, sandbox]),
+    ).toBe("app");
+    // No member of the group on the owner, or not a managed environment: nothing to redirect to.
+    expect(ownerOf(sandboxOther, all)).toBe("sandbox-other");
+    expect(ownerOf(sandbox, all, new Map())).toBe("sandbox-clone");
+    expect(ownerOf(root, all)).toBe("root");
+
+    // A default draft opens on the owner's project, and waits for it while only the sandbox loaded.
+    const newDraftOn = (ordered: ReadonlyArray<EnvironmentProject>) =>
+      selectNewDraftProject(ordered, managed, settings("repository"))?.id ?? null;
+    expect(newDraftOn([sandbox, other, root])).toBe("root");
+    expect(newDraftOn([sandbox, sandboxOther])).toBeNull();
+    expect(newDraftOn([sandboxOther, other])).toBe("other");
   });
 
   it("keeps a fork apart from its upstream checkout and labels it by its own remote", () => {

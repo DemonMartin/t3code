@@ -55,6 +55,7 @@ import {
 } from "./lib/windowControlsOverlay";
 import { startProviderAuthDelivery } from "./providerAuthDelivery";
 import { getRouter, type AppRouter } from "./router";
+import { startManagedEnvironmentWake } from "./components/plugins/managedEnvironmentWakeService";
 import { appAtomRegistry } from "./rpc/atomRegistry";
 import { environmentProjects } from "./state/projects";
 import { primaryRelayTracingAllowedAtom, primaryServerConfigAtom } from "./state/server";
@@ -294,6 +295,7 @@ export function startAppServices(): AppRouter {
   installCommandPaletteCommands(router);
   registerOpenFavoriteEditorCommand();
   startThreadOverlayRetention(router);
+  startManagedEnvironmentWake(router);
   // Drafts promote as their server threads arrive, wherever the user is.
   subscribeDraftThreadPromotion({
     registry: appAtomRegistry,

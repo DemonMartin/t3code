@@ -23,14 +23,19 @@ import { create } from "zustand";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { pluginCatalogsAtom } from "../../state/plugins";
 import { serverEnvironment } from "../../state/server";
+import { threadEnvironment } from "../../state/threads";
 
 type Entry = PluginCatalog["plugins"][number];
 
 export interface PluginActionRun {
   readonly environmentId: EnvironmentId;
+  /** Where the thread itself lives, which is not always where the plugin runs. */
+  readonly threadEnvironmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly plugin: Entry;
   readonly action: PluginStatusAction;
+  /** The value picked from the action's list, when it offers one. */
+  readonly choice?: string;
   readonly phase: "ask" | "running" | "done";
   readonly notice: PluginNoticeResult | null;
   /** Progress reported by a relayed step. */
@@ -99,9 +104,17 @@ export function startPluginAction(destination: EnvironmentId | null) {
     start: {
       environmentId: run.environmentId,
       commandId: run.action.command,
-      input: pluginStatusActionInput(run.action, run.threadId, destination),
+      input: pluginStatusActionInput(run.action, run.threadId, destination, run.choice),
     },
     execute: (step) => execute(running, step),
+    // Recorded on the thread's own environment, so it survives a reload and shows everywhere.
+    onThreadNotice: (text) =>
+      void runAtomCommand(
+        appAtomRegistry,
+        threadEnvironment.recordEnvironmentNotice,
+        { environmentId: run.threadEnvironmentId, input: { threadId: run.threadId, text } },
+        { label: "plugin-thread-notice", reportFailure: false },
+      ),
     signal: controller.signal,
     onStatus: (status) => {
       const now = current();
@@ -119,9 +132,11 @@ export function startPluginAction(destination: EnvironmentId | null) {
 /** Called when a status action is pressed. One action runs at a time. */
 export function openPluginAction(request: {
   readonly environmentId: EnvironmentId;
+  readonly threadEnvironmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly plugin: Entry;
   readonly action: PluginStatusAction;
+  readonly choice?: string;
 }) {
   if (usePluginActionRun.getState().run?.phase === "running") return;
   const asks = request.action.confirm !== undefined || request.action.environment !== undefined;

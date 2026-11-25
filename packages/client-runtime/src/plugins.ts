@@ -1,13 +1,19 @@
 import { mFallback, msg } from "gt-i18n";
 import type { MFunctionType } from "gt-i18n/types";
 import type {
+  PluginAction,
   PluginBlock,
+  PluginChoiceCreate,
+  PluginChoiceOption,
   PluginInput,
   PluginCatalog,
   PluginStatusAction,
+  PluginView,
 } from "@t3tools/contracts";
 import {
   PluginEnvironmentLaunchResult,
+  PluginLaunchOptionsResult,
+  PluginThreadNoticeResult,
   PluginNoticeResult,
   PluginRelayResult,
   PluginSecretResult,
@@ -94,6 +100,206 @@ export function pluginSettingsPages(catalog: PluginCatalog) {
     );
 }
 
+/** `autoLaunch` is null unless the view names a command its plugin registered. */
+export function pluginEnvironmentLaunchers(catalog: PluginCatalog | null | undefined) {
+  return (catalog?.plugins ?? []).flatMap((plugin) =>
+    plugin.status === "active"
+      ? plugin.views
+          .filter((view) => view.location === "environment-launcher")
+          .map((view) => {
+            const command = plugin.commands.find((command) => command.id === view.autoLaunch);
+            const options = plugin.commands.find(
+              (command) => command.id === view.autoLaunchOptions,
+            );
+            return {
+              pluginId: plugin.id,
+              viewId: view.id,
+              title: view.title,
+              autoLaunch: command
+                ? { commandId: command.id, permission: command.permission }
+                : null,
+              autoLaunchOptions: options
+                ? { commandId: options.id, permission: options.permission }
+                : null,
+            };
+          })
+      : [],
+  );
+}
+export type PluginEnvironmentLauncher = ReturnType<typeof pluginEnvironmentLaunchers>[number];
+export type PluginAutoLauncher = PluginEnvironmentLauncher & {
+  readonly autoLaunch: NonNullable<PluginEnvironmentLauncher["autoLaunch"]>;
+};
+
+/** The launcher a new draft's first send starts through, when a plugin asks for that. */
+export function pluginAutoLauncher(
+  catalog: PluginCatalog | null | undefined,
+): PluginAutoLauncher | null {
+  return (
+    pluginEnvironmentLaunchers(catalog).find(
+      (launcher): launcher is PluginAutoLauncher => launcher.autoLaunch !== null,
+    ) ?? null
+  );
+}
+
+/** The entries of a list whose label or description contains what the user typed. */
+export function pluginChoiceMatches<Choice extends PluginChoiceOption>(
+  choices: ReadonlyArray<Choice>,
+  query: string,
+): ReadonlyArray<Choice> {
+  const needle = query.trim().toLowerCase();
+  return needle === ""
+    ? choices
+    : choices.filter((choice) =>
+        `${choice.label} ${choice.description ?? ""}`.toLowerCase().includes(needle),
+      );
+}
+
+/** The entry a list gained since `before`: what the user just created, to select it for them. */
+export function pluginCreatedChoice<Choice extends PluginChoiceOption>(
+  before: ReadonlyArray<string>,
+  choices: ReadonlyArray<Choice>,
+): Choice | null {
+  return choices.find((choice) => !before.includes(choice.value)) ?? null;
+}
+
+/** A list's create form in the shape plugin forms use, so both read their fields the same way. */
+export function pluginChoiceCreateForm(create: PluginChoiceCreate): PluginForm {
+  return {
+    id: "create",
+    kind: "form",
+    label: create.label,
+    command: create.command,
+    fields: create.fields,
+    input: create.input,
+  };
+}
+
+const decodeLaunchOptionsResult = Schema.decodeUnknownOption(PluginLaunchOptionsResult);
+export type PluginLaunchOption = PluginLaunchOptionsResult["options"][number];
+
+/** The options a launcher offers for a new launch; none for any other answer. */
+export function pluginLaunchOptions(value: unknown): ReadonlyArray<PluginLaunchOption> {
+  return Option.getOrNull(decodeLaunchOptionsResult(value))?.options ?? [];
+}
+
+/** What each option is set to: the user's pick while it is still offered, else its default. */
+export function pluginLaunchOptionValues(
+  options: ReadonlyArray<PluginLaunchOption>,
+  picked: Readonly<Record<string, string>>,
+): Record<string, string> {
+  return Object.fromEntries(
+    options.map((option) => {
+      const pick = picked[option.name];
+      return [
+        option.name,
+        option.choices.some((choice) => choice.value === pick) && pick !== undefined
+          ? pick
+          : option.value,
+      ];
+    }),
+  );
+}
+
+/** The launch context wins over an option of the same name, so no option can replace the message. */
+export function pluginLaunchContextWithOptions<Context extends PluginInput>(
+  context: Context,
+  options: ReadonlyArray<PluginLaunchOption>,
+  picked: Readonly<Record<string, string>>,
+): Context & PluginInput {
+  return { ...pluginLaunchOptionValues(options, picked), ...context };
+}
+
+/** The thread a launch started, once its environment runs and this client is connected to it. */
+export function pluginLaunchDestination(
+  resources: ReadonlyArray<{
+    readonly owner: { readonly environmentId: string; readonly pluginId: string };
+    readonly environmentId: string;
+    readonly launchRequestId?: string | undefined;
+    readonly state: string;
+    readonly threadId?: string | undefined;
+  }>,
+  isConnected: (environmentId: string) => boolean,
+  launch: {
+    readonly environmentId: string;
+    readonly pluginId: string;
+    readonly requestId: unknown;
+  },
+): { readonly environmentId: string; readonly threadId: string } | null {
+  for (const resource of resources) {
+    if (
+      resource.owner.environmentId === launch.environmentId &&
+      resource.owner.pluginId === launch.pluginId &&
+      resource.launchRequestId === launch.requestId &&
+      resource.state === "running" &&
+      resource.threadId &&
+      isConnected(resource.environmentId)
+    )
+      return { environmentId: resource.environmentId, threadId: resource.threadId };
+  }
+  return null;
+}
+
+export interface PluginLaunchStep {
+  readonly id: string;
+  readonly label: string;
+  readonly detail: string | null;
+  readonly status: "done" | "running" | "pending" | "failed";
+}
+const LAUNCH_STEP_STATUS = {
+  success: "done",
+  warning: "running",
+  muted: "pending",
+  danger: "failed",
+} as const;
+
+/**
+ * A launch in flight, read from its launcher view: status blocks are the steps, actions the
+ * controls, code blocks the running step's output. Text alone (an older launcher) is one step.
+ * A view with none of these, or with a form, is asking how to launch: the launch is gone.
+ */
+export function pluginLaunchProgress(view: PluginView | null): {
+  readonly withdrawn: boolean;
+  readonly steps: ReadonlyArray<PluginLaunchStep>;
+  readonly actions: ReadonlyArray<PluginAction>;
+  readonly output: ReadonlyArray<string>;
+} {
+  if (view === null) return { withdrawn: false, steps: [], actions: [], output: [] };
+  const actions = view.blocks.flatMap((block) => (block.kind === "actions" ? block.actions : []));
+  const output = view.blocks.flatMap((block) =>
+    block.kind === "code" ? block.text.replace(/\n+$/u, "").split("\n") : [],
+  );
+  const steps = view.blocks.flatMap((block): PluginLaunchStep[] =>
+    block.kind === "status" && block.label !== undefined
+      ? [
+          {
+            id: block.id,
+            label: block.label,
+            detail: block.detail ?? null,
+            status: LAUNCH_STEP_STATUS[block.tone ?? "muted"],
+          },
+        ]
+      : [],
+  );
+  if (steps.length > 0) return { withdrawn: false, steps, actions, output };
+  const text = view.blocks.flatMap((block) => (block.kind === "text" ? [block.text] : []));
+  if (text.length === 0 || view.blocks.some((block) => block.kind === "form"))
+    return { withdrawn: true, steps: [], actions: [], output: [] };
+  return {
+    withdrawn: false,
+    steps: [
+      {
+        id: "launch",
+        label: text.join(" · "),
+        detail: null,
+        status: actions.some((action) => action.id === "retry") ? "failed" : "running",
+      },
+    ],
+    actions,
+    output,
+  };
+}
+
 export type PluginStatus = Extract<PluginBlock, { readonly kind: "status" }>;
 
 export function pluginThreadDetailsViews(catalog: PluginCatalog) {
@@ -106,16 +312,23 @@ export function pluginThreadDetailsViews(catalog: PluginCatalog) {
     );
 }
 
-/** The thread is added last, so a plugin's own input cannot name another thread. */
+/**
+ * The thread is added last, so a plugin's own input cannot name another thread. A picked
+ * value is sent only when it is one the action offered.
+ */
 export function pluginStatusActionInput(
   action: PluginStatusAction,
   threadId: string,
   destination: string | null,
+  picked?: string,
 ): PluginInput {
   return {
     ...action.input,
     ...(action.environment && destination !== null
       ? { [action.environment.name]: destination }
+      : {}),
+    ...(action.choice?.options.some((option) => option.value === picked) && picked !== undefined
+      ? { [action.choice.name]: picked }
       : {}),
     threadId,
   };
@@ -166,6 +379,7 @@ const failed = (message: string | null, resolve: MFunctionType): PluginNoticeRes
   text: message ?? resolve(msg("The plugin command failed. Try again.")),
 });
 
+const decodeThreadNoticeResult = Schema.decodeUnknownOption(PluginThreadNoticeResult);
 const decodeRelayResult = Schema.decodeUnknownOption(PluginRelayResult);
 /** Enough for a large carried transfer; a plugin that never finishes still stops. */
 const MAX_PLUGIN_RELAY_STEPS = 5_000;
@@ -179,6 +393,8 @@ export async function runPluginAction(options: {
   readonly start: PluginActionStep;
   readonly execute: (step: PluginActionStep) => Promise<PluginActionReply>;
   readonly onStatus?: (status: string) => void;
+  /** The action ended by noting what it changed; the caller records that in the thread. */
+  readonly onThreadNotice?: (text: string) => void;
   readonly signal?: AbortSignal;
 }): Promise<PluginNoticeResult | null> {
   let step = options.start;
@@ -187,7 +403,11 @@ export async function runPluginAction(options: {
     const reply = await options.execute(step);
     if (!reply.ok) return failed(reply.message, options.resolve ?? mFallback);
     const relay = Option.getOrNull(decodeRelayResult(reply.value));
-    if (relay === null) return Option.getOrNull(decodeNoticeResult(reply.value));
+    if (relay === null) {
+      const threadNotice = Option.getOrNull(decodeThreadNoticeResult(reply.value));
+      if (threadNotice !== null) options.onThreadNotice?.(threadNotice.text);
+      return Option.getOrNull(decodeNoticeResult(reply.value));
+    }
     if (relay.status !== undefined) options.onStatus?.(relay.status);
     step = {
       environmentId: relay.environmentId ?? step.environmentId,

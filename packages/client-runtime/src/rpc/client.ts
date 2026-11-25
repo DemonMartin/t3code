@@ -188,6 +188,21 @@ export const currentSession = Effect.fn("EnvironmentRpc.currentSession")(functio
   );
 });
 
+/**
+ * Gives an environment that was just started a moment to open its session, so the command
+ * sent on its heels finds it. A session that never opens fails that command as usual.
+ */
+export const awaitSession = Effect.fn("EnvironmentRpc.awaitSession")(function* (
+  timeout: Duration.Input,
+) {
+  const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+  yield* SubscriptionRef.changes(supervisor.session).pipe(
+    Stream.filter(Option.isSome),
+    Stream.runHead,
+    Effect.timeoutOption(timeout),
+  );
+});
+
 export const getInitialServerConfig = Effect.fn("EnvironmentRpc.getInitialServerConfig")(
   function* () {
     const session = yield* currentSession();

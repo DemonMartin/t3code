@@ -1,8 +1,11 @@
 import { expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
-import { PluginView } from "./index.ts";
+import { PluginLaunchOptionsResult, PluginView, PluginViewDescriptor } from "./index.ts";
 
 const valid = Schema.is(PluginView);
+const decodeView = Schema.decodeUnknownSync(PluginView);
+const decodeDescriptor = Schema.decodeUnknownSync(PluginViewDescriptor);
+const launchOptions = Schema.is(PluginLaunchOptionsResult);
 it("rejects ambiguous form and table identities before clients render them", () => {
   const form = {
     id: "settings",
@@ -117,4 +120,126 @@ it("bounds ordered graphs and rejects backwards edges and duplicate nodes", () =
       ],
     }),
   ).toBe(false);
+});
+
+it("carries an optional auto-launch command id on a view descriptor", () => {
+  const decode = Schema.decodeUnknownSync(PluginViewDescriptor);
+  const launcher = {
+    id: "launcher",
+    title: "New sandbox",
+    location: "environment-launcher",
+    permission: "environment:maintain",
+  };
+  expect(decode({ ...launcher, autoLaunch: "launch" })).toEqual({
+    ...launcher,
+    autoLaunch: "launch",
+  });
+  expect(decode(launcher)).toEqual(launcher);
+  expect(() => decode({ ...launcher, autoLaunch: "Not An Id" })).toThrow();
+});
+
+it("lets a stopped managed environment name the action that starts it again", () => {
+  const environment = {
+    id: "sandbox",
+    kind: "environment",
+    environmentId: "sbx-1",
+    label: "Sandbox",
+    url: "https://sandbox.test",
+    state: "stopped",
+    connect: { id: "pair", label: "Connect", command: "pair", input: {} },
+  };
+  const resume = { id: "resume", label: "Resume", command: "state", input: { state: "running" } };
+  expect(valid({ title: "Environments", blocks: [environment] })).toBe(true);
+  expect(valid({ title: "Environments", blocks: [{ ...environment, resume }] })).toBe(true);
+  expect(valid({ title: "Environments", blocks: [{ ...environment, resume: "state" }] })).toBe(
+    false,
+  );
+});
+
+it("lets a status action offer a list whose current value is one of its options", () => {
+  const options = [
+    { label: "10 min", value: "600" },
+    { label: "1 h", value: "3600" },
+  ];
+  const status = (choice: unknown) => ({
+    title: "Thread",
+    blocks: [
+      {
+        id: "state",
+        kind: "status",
+        label: "Sandbox running",
+        actions: [{ id: "idle", label: "Idle stop", command: "idle", input: {}, choice }],
+      },
+    ],
+  });
+  const choice = { name: "seconds", value: "600", options };
+  expect(decodeView(status(choice)).blocks[0]).toMatchObject({
+    actions: [{ choice }],
+  });
+  expect(valid(status({ ...choice, value: "86400" }))).toBe(false);
+  expect(valid(status({ ...choice, options: [...options, options[0]] }))).toBe(false);
+  expect(valid(status({ ...choice, name: "Not An Id" }))).toBe(false);
+
+  // An entry may describe itself, and the list may offer a form that adds one.
+  const field = (name: string, kind: string) => ({ name, label: name, kind });
+  const create = {
+    label: "New size",
+    command: "size-save",
+    fields: [field("id", "text"), field("cpus", "number")],
+    input: {},
+  };
+  const described = { ...choice, options: [{ ...options[0], description: "4 cores" }], create };
+  expect(decodeView(status(described)).blocks[0]).toMatchObject({
+    actions: [{ choice: described }],
+  });
+  expect(
+    valid(
+      status({
+        ...choice,
+        create: { ...create, fields: [field("id", "text"), field("id", "text")] },
+      }),
+    ),
+  ).toBe(false);
+  expect(
+    valid(
+      status({
+        ...choice,
+        create: { ...create, fields: Array.from({ length: 7 }, (_, i) => field(`f${i}`, "text")) },
+      }),
+    ),
+  ).toBe(false);
+  expect(
+    launchOptions({
+      $t3: "launch-options",
+      options: [{ name: "size", label: "Size", value: "600", choices: described.options, create }],
+    }),
+  ).toBe(true);
+});
+
+it("lets a launcher name a command that offers options for a new launch", () => {
+  const launcher = {
+    id: "launcher",
+    title: "New sandbox",
+    location: "environment-launcher",
+    permission: "environment:maintain",
+    autoLaunch: "launch",
+    autoLaunchOptions: "launch-options",
+  };
+  expect(decodeDescriptor(launcher)).toEqual(launcher);
+  expect(() => decodeDescriptor({ ...launcher, autoLaunchOptions: "Not An Id" })).toThrow();
+
+  const choices = [
+    { label: "Low · 4 cores · 16 GB", value: "low" },
+    { label: "High · 16 cores · 64 GB", value: "high" },
+  ];
+  const size = { name: "size", label: "Size", value: "low", choices };
+  expect(launchOptions({ $t3: "launch-options", options: [size] })).toBe(true);
+  expect(launchOptions({ $t3: "launch-options", options: [] })).toBe(true);
+  expect(launchOptions({ $t3: "launch-options", options: [{ ...size, name: "Not An Id" }] })).toBe(
+    false,
+  );
+  expect(
+    launchOptions({ $t3: "launch-options", options: Array.from({ length: 5 }, () => size) }),
+  ).toBe(false);
+  expect(launchOptions({ options: [size] })).toBe(false);
 });

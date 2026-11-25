@@ -56,6 +56,20 @@ const status = {
   label: "Paused",
   actions: [
     {
+      id: "idle",
+      label: "Idle stop",
+      command: "change",
+      input: {},
+      choice: {
+        name: "seconds",
+        value: "600",
+        options: [
+          { label: "10 min", value: "600" },
+          { label: "1 h", value: "3600" },
+        ],
+      },
+    },
+    {
       id: "move",
       label: "Move",
       command: "change",
@@ -306,6 +320,7 @@ it.effect("filters and authorizes views and rejects malformed view output", () =
               id: location,
               title: "Machines",
               location,
+              ...(location === "environment-launcher" ? { autoLaunch: "launch" } : {}),
               permission: "environment:maintain" as const,
               read: (input?: Record<string, Schema.Json>) =>
                 Effect.succeed({
@@ -323,6 +338,13 @@ it.effect("filters and authorizes views and rejects malformed view output", () =
                   ],
                 }),
             })),
+            {
+              id: "launching",
+              title: "Launching",
+              location: "environment-launcher" as const,
+              permission: "environment:maintain" as const,
+              read: () => Effect.succeed({ title: "Launching", blocks: [status] }),
+            },
             ...(["thread-details", "usage"] as const).map((location) => ({
               id: location,
               title: "Row",
@@ -355,7 +377,11 @@ it.effect("filters and authorizes views and rejects malformed view output", () =
           .readView({ ...row, viewId: "environment-launcher" }, AuthStandardClientScopes)
           .pipe(Effect.flip))._tag,
       ).toBe("PluginOperationError");
-      // A status block is only drawn by the thread details row.
+      // A launcher reports the steps of a launch in flight as status blocks.
+      expect(
+        (yield* host.readView({ ...row, viewId: "launching" }, AuthStandardClientScopes)).blocks,
+      ).toEqual([status]);
+      // Elsewhere a status block is only drawn by the thread details row.
       expect(
         (yield* host
           .readView({ ...row, viewId: "usage" }, ["orchestration:read"])
@@ -364,6 +390,11 @@ it.effect("filters and authorizes views and rejects malformed view output", () =
       expect(
         (yield* host.list(["orchestration:read"])).plugins[0]?.views.map((view) => view.id),
       ).toEqual(["thread-details", "usage"]);
+      expect(
+        (yield* host.list(AuthStandardClientScopes)).plugins[0]?.views.find(
+          (view) => view.id === "environment-launcher",
+        )?.autoLaunch,
+      ).toBe("launch");
       expect((yield* host.readView(input, ["orchestration:read"]).pipe(Effect.flip))._tag).toBe(
         "EnvironmentAuthorizationError",
       );

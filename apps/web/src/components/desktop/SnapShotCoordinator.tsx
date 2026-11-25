@@ -23,7 +23,9 @@ import {
   lastUsedProjectKeySchema,
   useHandleNewThread,
 } from "../../hooks/useHandleNewThread";
+import { useAtomValue } from "@effect/atom-react";
 import { scopedProjectKey } from "@t3tools/client-runtime/environment";
+import { managedEnvironmentOwnersAtom } from "../../state/plugins";
 import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import { getClientSettings, useClientSettings } from "../../hooks/useSettings";
@@ -245,12 +247,15 @@ export function SnapShotCoordinator() {
     lastUsedProjectKeySchema,
   );
   const currentProject = activeThread ?? activeDraftThread;
-  const currentProjectKey = currentProject
-    ? scopedProjectKey({
-        environmentId: currentProject.environmentId,
-        projectId: currentProject.projectId,
-      })
-    : null;
+  const managedOwners = useAtomValue(managedEnvironmentOwnersAtom);
+  // A sandbox's project is never where the next thread starts, so it is not worth remembering.
+  const currentProjectKey =
+    currentProject && !managedOwners.has(currentProject.environmentId)
+      ? scopedProjectKey({
+          environmentId: currentProject.environmentId,
+          projectId: currentProject.projectId,
+        })
+      : null;
   const rememberProject = useEffectEvent((projectKey: string) => {
     if (projectKey !== lastUsedProjectKey) setLastUsedProjectKey(projectKey);
   });

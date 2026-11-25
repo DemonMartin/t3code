@@ -1,3 +1,4 @@
+import type { PluginLaunchOptionsControl } from "./usePluginLaunchOptions";
 import { PluginPanels } from "../plugins/PluginPanels";
 import type {
   EditorId,
@@ -78,6 +79,7 @@ interface ThreadDetailsPanelProps extends Pick<
   hasRepository: boolean;
   envLocked: boolean;
   availableEnvironments: readonly EnvironmentOption[];
+  launchOptions?: PluginLaunchOptionsControl | undefined;
   autoEnvironmentLabel?: string | undefined;
   onAutoEnvironment?: (() => void) | undefined;
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
@@ -231,6 +233,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                               : {})}
                             autoEnvironmentLabel={props.autoEnvironmentLabel}
                             onAutoEnvironment={props.onAutoEnvironment}
+                            launchOptions={props.launchOptions}
                             {...branchToolbarProps}
                             showGitControls={props.offersWorkspaceModes}
                           />

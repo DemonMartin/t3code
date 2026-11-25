@@ -3476,3 +3476,47 @@ it.effect("notes where a moved thread continues without starting a provider", ()
     assert.deepEqual(yield* outbox.listByCommandId(command.commandId), []);
   }).pipe(Effect.provide(layerTest)),
 );
+
+it.effect("notes a changed environment setting in the thread without starting a provider", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const threadId = ThreadId.make("thread:resized");
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create:resized"),
+      threadId,
+      projectId: ProjectId.make("project:resized"),
+      title: "Resized",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: "feature",
+      worktreePath: "/repo/worktrees/feature",
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const command = {
+      type: "thread.environment-notice.record" as const,
+      commandId: CommandId.make("notice:resized"),
+      threadId,
+      text: "Sandbox size changed to Medium (8 cores · 32 GB)",
+    };
+    yield* orchestrator.dispatch(command);
+    // The same command again, as a retried request would send it, adds no second note.
+    yield* orchestrator.dispatch(command);
+
+    const projection = yield* projections.getThreadProjection(threadId);
+    assert.equal(projection.runs.length, 0);
+    const history = yield* projections.getTimelinePage(threadId, { limit: 20, view: "activity" });
+    const notices = history.items.flatMap(({ item }) =>
+      item.type === "system_notice" ? [item] : [],
+    );
+    assert.equal(notices.length, 1);
+    assert.equal(notices[0]?.message, command.text);
+    assert.equal(notices[0]?.about, "environment");
+    assert.equal(notices[0]?.level, "info");
+    assert.deepEqual(yield* outbox.listByCommandId(command.commandId), []);
+  }).pipe(Effect.provide(layerTest)),
+);

@@ -12,6 +12,16 @@ import {
   pluginViewResult,
   pluginGraphLayout,
   pluginThreadPanels,
+  pluginAutoLauncher,
+  pluginChoiceCreateForm,
+  pluginChoiceMatches,
+  pluginCreatedChoice,
+  pluginEnvironmentLaunchers,
+  pluginLaunchContextWithOptions,
+  pluginLaunchDestination,
+  pluginLaunchOptions,
+  pluginLaunchOptionValues,
+  pluginLaunchProgress,
   type PluginForm,
 } from "./plugins.ts";
 
@@ -154,6 +164,30 @@ describe("thread details actions", () => {
       threadId: "pressed-thread",
     });
   });
+  it("sends the value picked from an action's list, and only one the action offered", () => {
+    const idle = {
+      id: "idle",
+      label: "Idle stop",
+      command: "idle",
+      input: { seconds: "600", threadId: "another-thread" },
+      choice: {
+        name: "seconds",
+        value: "600",
+        options: [
+          { label: "10 min", value: "600" },
+          { label: "1 h", value: "3600" },
+        ],
+      },
+    };
+    expect(pluginStatusActionInput(idle, "pressed-thread", null, "3600")).toEqual({
+      seconds: "3600",
+      threadId: "pressed-thread",
+    });
+    expect(pluginStatusActionInput(idle, "pressed-thread", null, "86400")).toEqual({
+      seconds: "600",
+      threadId: "pressed-thread",
+    });
+  });
   it("offers only other environments where the plugin is running", () => {
     expect(
       pluginActionDestinations(
@@ -190,6 +224,19 @@ describe("thread details actions", () => {
     expect(
       await runPluginAction({ start, execute: async () => ({ ok: true, value: { any: 1 } }) }),
     ).toBeNull();
+    // An action that ends by noting what it changed hands the text over and opens no dialog.
+    const noted: Array<string> = [];
+    expect(
+      await runPluginAction({
+        start,
+        execute: async () => ({
+          ok: true,
+          value: { $t3: "thread-notice", text: "Idle stop set to 1 h" },
+        }),
+        onThreadNotice: (text) => noted.push(text),
+      }),
+    ).toBeNull();
+    expect(noted).toEqual(["Idle stop set to 1 h"]);
   });
   it("carries relayed steps between environments until the plugin ends or the user cancels", async () => {
     const start = { environmentId: "source", commandId: "move", input: {} };
@@ -299,4 +346,218 @@ it("hides repository-required thread panels until a Git repository is confirmed"
   expect(
     pluginThreadPanels({ ...catalog, plugins: [{ ...plugin, status: "disabled" }] }, true),
   ).toEqual([]);
+});
+
+it("starts new drafts through the launcher whose auto-launch command its plugin registered", () => {
+  const view = {
+    title: "New sandbox",
+    location: "environment-launcher" as const,
+    permission: "environment:maintain" as const,
+  };
+  const plugin = {
+    id: "sandboxes",
+    name: "Sandboxes",
+    version: "1.0.0",
+    status: "active" as const,
+    commands: [
+      {
+        id: "launch",
+        title: "Launch",
+        description: "Start a sandboxed thread",
+        permission: "environment:maintain" as const,
+        agent: false,
+      },
+    ],
+    views: [
+      { ...view, id: "manual" },
+      { ...view, id: "missing", autoLaunch: "withdrawn" },
+      { ...view, id: "launcher", autoLaunch: "launch", autoLaunchOptions: "launch" },
+      { ...view, id: "settings", location: "settings" as const, autoLaunch: "launch" },
+    ],
+  };
+  const catalog = { configurationError: false, plugins: [plugin] };
+  const auto = { commandId: "launch", permission: "environment:maintain" };
+  expect(
+    pluginEnvironmentLaunchers(catalog).map(({ viewId, autoLaunch }) => [viewId, autoLaunch]),
+  ).toEqual([
+    ["manual", null],
+    ["missing", null],
+    ["launcher", auto],
+  ]);
+  expect(pluginAutoLauncher(catalog)).toEqual({
+    pluginId: "sandboxes",
+    viewId: "launcher",
+    title: "New sandbox",
+    autoLaunch: auto,
+    // The options command counts only when the plugin registered it, like the launch itself.
+    autoLaunchOptions: auto,
+  });
+  expect(pluginEnvironmentLaunchers(catalog)[1]?.autoLaunchOptions).toBeNull();
+  expect(
+    pluginAutoLauncher({ ...catalog, plugins: [{ ...plugin, status: "stopped" }] }),
+  ).toBeNull();
+  expect(
+    pluginAutoLauncher({ ...catalog, plugins: [{ ...plugin, views: plugin.views.slice(0, 2) }] }),
+  ).toBeNull();
+  expect(pluginAutoLauncher(null)).toBeNull();
+});
+
+it("starts a launch with the options the user picked, and the plugin's defaults otherwise", () => {
+  const size = {
+    name: "size",
+    label: "Size",
+    value: "low",
+    choices: [
+      { label: "Low", value: "low" },
+      { label: "High", value: "high" },
+    ],
+  };
+  const options = pluginLaunchOptions({
+    $t3: "launch-options",
+    options: [size, { ...size, name: "message", value: "replaced" }],
+  });
+  expect(options.map((option) => option.name)).toEqual(["size", "message"]);
+  // Anything else a command answers offers nothing.
+  expect(pluginLaunchOptions(null)).toEqual([]);
+  expect(
+    pluginLaunchOptions({ $t3: "launch-options", options: [{ ...size, name: "No" }] }),
+  ).toEqual([]);
+
+  const context = { message: "Fix the test", projectDirectory: "/work/app" };
+  expect(pluginLaunchContextWithOptions(context, options, { size: "high" })).toEqual({
+    size: "high",
+    message: "Fix the test",
+    projectDirectory: "/work/app",
+  });
+  // No pick, or one the option no longer offers, starts with the default.
+  expect(pluginLaunchContextWithOptions(context, options, {}).size).toBe("low");
+  expect(pluginLaunchContextWithOptions(context, options, { size: "huge" }).size).toBe("low");
+  expect(pluginLaunchOptionValues(options, { size: "high" })).toEqual({
+    size: "high",
+    message: "replaced",
+  });
+});
+
+it("searches a list by label and description, and finds the entry a save added", () => {
+  const choices = [
+    { label: "Low", value: "low", description: "4 cores · 16 GB" },
+    { label: "High", value: "high", description: "16 cores · 64 GB" },
+    { label: "Custom", value: "custom" },
+  ];
+  const matches = (query: string) => pluginChoiceMatches(choices, query).map(({ value }) => value);
+  expect(matches("")).toEqual(["low", "high", "custom"]);
+  expect(matches(" HIGH ")).toEqual(["high"]);
+  expect(matches("16")).toEqual(["low", "high"]);
+  expect(matches("none")).toEqual([]);
+
+  expect(pluginCreatedChoice(["low", "high"], choices)?.value).toBe("custom");
+  expect(pluginCreatedChoice(["low", "high", "custom"], choices)).toBeNull();
+
+  // A create form reads its fields like any plugin form: numbers parsed, its own input kept.
+  const form = pluginChoiceCreateForm({
+    label: "New size",
+    command: "size-save",
+    fields: [
+      { name: "id", label: "Name", kind: "text", required: true },
+      { name: "cpus", label: "Cores", kind: "number" },
+    ],
+    input: { scope: "sizes" },
+  });
+  expect(pluginFormInput(form, { id: "huge", cpus: "32" })).toEqual({
+    scope: "sizes",
+    id: "huge",
+    cpus: 32,
+  });
+  expect(pluginFormInput(form, { id: "", cpus: "32" })).toBeNull();
+});
+
+it("opens a launch's thread only once its environment runs and is connected", () => {
+  const launch = { environmentId: "controller", pluginId: "sandboxes", requestId: "request" };
+  const resource = {
+    owner: { environmentId: "controller", pluginId: "sandboxes" },
+    environmentId: "sandbox",
+    launchRequestId: "request",
+    state: "running",
+    threadId: "thread",
+  };
+  const destination = (
+    resources: Parameters<typeof pluginLaunchDestination>[0],
+    connected = ["sandbox"],
+  ) => pluginLaunchDestination(resources, (id) => connected.includes(id), launch);
+
+  expect(destination([resource])).toEqual({ environmentId: "sandbox", threadId: "thread" });
+  expect(destination([resource], [])).toBeNull();
+  expect(destination([{ ...resource, state: "starting" }])).toBeNull();
+  expect(destination([{ ...resource, threadId: undefined }])).toBeNull();
+  expect(destination([{ ...resource, launchRequestId: "another" }])).toBeNull();
+  expect(
+    destination([{ ...resource, owner: { environmentId: "controller", pluginId: "other" } }]),
+  ).toBeNull();
+});
+
+it("reads a launch's steps and controls from its launcher view", () => {
+  const cancel = { id: "cancel", label: "Cancel provisioning", command: "cancel", input: {} };
+  const retry = { id: "retry", label: "Retry", command: "state", input: {} };
+  const step = (id: string, tone: "success" | "warning" | "muted" | "danger", detail?: string) => ({
+    id,
+    kind: "status" as const,
+    tone,
+    label: id,
+    ...(detail === undefined ? {} : { detail }),
+    actions: [],
+  });
+  const view = (blocks: NonNullable<Parameters<typeof pluginLaunchProgress>[0]>["blocks"]) =>
+    pluginLaunchProgress({ title: "New sandbox", blocks });
+
+  expect(
+    view([
+      step("start", "success"),
+      step("prepare", "warning", "pulling image"),
+      step("agent", "muted"),
+      { id: "control", kind: "actions", actions: [cancel] },
+    ]),
+  ).toEqual({
+    withdrawn: false,
+    steps: [
+      { id: "start", label: "start", detail: null, status: "done" },
+      { id: "prepare", label: "prepare", detail: "pulling image", status: "running" },
+      { id: "agent", label: "agent", detail: null, status: "pending" },
+    ],
+    actions: [cancel],
+    output: [],
+  });
+  expect(view([step("start", "danger", "image not found")]).steps[0]?.status).toBe("failed");
+
+  // A launcher that predates steps reports one line of text, and offers retry once it stopped.
+  const text = { id: "progress", kind: "text" as const, text: "starting: pulling image" };
+  expect(view([text, { id: "control", kind: "actions", actions: [cancel] }]).steps).toEqual([
+    { id: "launch", label: "starting: pulling image", detail: null, status: "running" },
+  ]);
+  expect(view([text, { id: "control", kind: "actions", actions: [retry] }]).steps[0]?.status).toBe(
+    "failed",
+  );
+
+  // Without the launch the view falls back to its form: the launch was cancelled or deleted.
+  expect(
+    view([
+      { id: "scope", kind: "text", text: "Starts from a pushed commit." },
+      { id: "launch", kind: "form", label: "Start", command: "launch", fields: [], input: {} },
+    ]).withdrawn,
+  ).toBe(true);
+  expect(view([]).withdrawn).toBe(true);
+  // A view still loading says nothing either way.
+  expect(pluginLaunchProgress(null)).toEqual({
+    withdrawn: false,
+    steps: [],
+    actions: [],
+    output: [],
+  });
+
+  // Code blocks are what the running step printed.
+  expect(
+    view([
+      step("prepare", "warning"),
+      { id: "log", kind: "code", text: "installing\nbuilding packages\n" },
+    ]).output,
+  ).toEqual(["installing", "building packages"]);
 });

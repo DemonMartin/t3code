@@ -14,6 +14,8 @@ import { msg } from "gt-react";
 
 import { m } from "../i18n/messages";
 
+import { appAtomRegistry } from "../rpc/atomRegistry";
+import { managedEnvironmentStatusAtom } from "./managedEnvironmentWake";
 import { readEnvironmentScope, readEnvironmentScopeDenied } from "./session";
 import { useAtomCommand } from "./use-atom-command";
 
@@ -42,7 +44,11 @@ export function useOrchestrationCommand<W extends { readonly environmentId: Envi
 ): (value: W) => Promise<AtomCommandResult<A, E | EnvironmentAuthorizationError>> {
   const run = useAtomCommand(command, options);
   return async (value: W): Promise<AtomCommandResult<A, E | EnvironmentAuthorizationError>> => {
-    if (!permitted(value.environmentId)) {
+    // A stopped sandbox has no session to read scopes from. The command starts it, then checks.
+    if (
+      !permitted(value.environmentId) &&
+      appAtomRegistry.get(managedEnvironmentStatusAtom(value.environmentId)) === null
+    ) {
       return AsyncResult.failure(
         Cause.fail(
           new EnvironmentAuthorizationError({

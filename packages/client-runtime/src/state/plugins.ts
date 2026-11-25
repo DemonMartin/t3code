@@ -98,6 +98,9 @@ export function createPluginSummaryAtoms(input: {
                         (command) => command.id === block.connect.command,
                       );
                       if (!command) return [];
+                      const resume = plugin.commands.find(
+                        (command) => command.id === block.resume?.command,
+                      );
                       return [
                         {
                           ...block,
@@ -108,6 +111,16 @@ export function createPluginSummaryAtoms(input: {
                             permission: command.permission,
                             input: block.connect.input,
                           } satisfies PluginCommandInput,
+                          ...(block.resume && resume
+                            ? {
+                                resumeCommand: {
+                                  pluginId: plugin.id,
+                                  commandId: resume.id,
+                                  permission: resume.permission,
+                                  input: block.resume.input,
+                                } satisfies PluginCommandInput,
+                              }
+                            : {}),
                         },
                       ];
                     });
@@ -118,4 +131,8 @@ export function createPluginSummaryAtoms(input: {
   return { pluginCatalogsAtom, pluginStatusByEnvironmentAtom, managedPluginEnvironmentsAtom };
 }
 
-export { createManagedPluginConnections } from "../plugins/managed.ts";
+export {
+  createManagedPluginConnections,
+  managedEnvironmentOwners,
+  managedEnvironmentWakeStep,
+} from "../plugins/managed.ts";
