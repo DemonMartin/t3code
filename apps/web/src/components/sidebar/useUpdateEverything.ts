@@ -1,7 +1,6 @@
 import { msg, useMessages } from "gt-react";
 import { useAtomValue } from "@effect/atom-react";
 import { connectionErrorText } from "@t3tools/client-runtime/connection";
-import { PROVIDER_DISPLAY_NAMES } from "@t3tools/contracts";
 
 import { APP_VERSION } from "~/branding";
 import { isDesktopLocalConnectionTarget } from "~/connection/desktopLocal";
@@ -11,7 +10,11 @@ import { environmentIdsKey } from "~/state/environmentAtomList";
 import { environmentUpdateStatesAtom, serverEnvironment } from "~/state/server";
 import { environmentSessionStatesAtom } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
-import { getProviderUpdateRunOutcome } from "../ProviderUpdateLaunchNotification.logic";
+import { managedEnvironmentOwnersAtom } from "~/state/plugins";
+import {
+  describeProviderUpdate,
+  getProviderUpdateRunOutcome,
+} from "../ProviderUpdateLaunchNotification.logic";
 import { useProviderUpdates } from "../ProviderUpdatesAction";
 import { canUpdateServer, type ServerUpdateOutcome, useServerUpdate } from "../ServerUpdateAction";
 import {
@@ -56,7 +59,11 @@ export function useUpdateEverything(
   channelSwitch?: ChannelSwitchRelease,
 ) {
   const targetVersion = localUpdateVersion ?? APP_VERSION;
-  const { environments } = useEnvironments();
+  const managedOwners = useAtomValue(managedEnvironmentOwnersAtom);
+  // A plugin-managed environment is rebuilt from its image, never updated in place.
+  const environments = useEnvironments().environments.filter(
+    (environment) => !managedOwners.has(environment.environmentId),
+  );
   const resolve = useMessages();
   const environmentIds = environmentIdsKey(environments.map(({ environmentId }) => environmentId));
   const sessionStates = useAtomValue(environmentSessionStatesAtom(environmentIds));
@@ -95,9 +102,7 @@ export function useUpdateEverything(
       providerMachines: providers.machines.map((machine) => ({
         environmentId: machine.environmentId,
         label: machine.label,
-        providers: machine.candidates.map(
-          (candidate) => PROVIDER_DISPLAY_NAMES[candidate.driver] ?? candidate.driver,
-        ),
+        providers: machine.candidates.map(describeProviderUpdate),
       })),
     },
     resolve,

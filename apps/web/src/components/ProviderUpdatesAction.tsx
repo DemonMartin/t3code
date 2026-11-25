@@ -1,6 +1,7 @@
 import { m } from "../i18n/messages";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
-import { AuthProvidersManageScope, PROVIDER_DISPLAY_NAMES } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
+import { AuthProvidersManageScope } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
   settlePromise,
@@ -13,9 +14,10 @@ import { useEnvironmentProviders, useEnvironments } from "~/state/environments";
 import { serverEnvironment } from "~/state/server";
 import { useEnvironmentsWithScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { managedEnvironmentOwnersAtom } from "~/state/plugins";
 import {
-  canOneClickUpdateProviderCandidate,
-  collectProviderUpdateCandidates,
+  collectProviderUpdateMachines,
+  describeProviderUpdate,
   getProviderUpdateRunToastView,
   type ProviderUpdateRun,
 } from "./ProviderUpdateLaunchNotification.logic";
@@ -32,6 +34,7 @@ export function useCheckProviderUpdates() {
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
+  const managedOwners = useAtomValue(managedEnvironmentOwnersAtom);
   const inFlight = useRef<Promise<void> | null>(null);
 
   const check = async (quiet: boolean) => {
@@ -40,7 +43,8 @@ export function useCheckProviderUpdates() {
         .filter(
           (environment) =>
             environment.connection.phase === "connected" &&
-            manageableIds.has(environment.environmentId),
+            manageableIds.has(environment.environmentId) &&
+            !managedOwners.has(environment.environmentId),
         )
         .map(async ({ environmentId, label }) => {
           const result = await refreshProviders({ environmentId, input: { refreshModels: true } });
@@ -78,21 +82,17 @@ export function useProviderUpdates() {
   const updateProvider = useAtomCommand(serverEnvironment.updateProvider, {
     reportFailure: false,
   });
-  const machines = environments.flatMap((environment) => {
-    const providers = providersByEnvironment.get(environment.environmentId) ?? [];
-    if (
-      environment.connection.phase !== "connected" ||
-      !manageableIds.has(environment.environmentId)
-    ) {
-      return [];
-    }
-    const candidates = collectProviderUpdateCandidates(providers).filter((candidate) =>
-      canOneClickUpdateProviderCandidate(candidate, providers),
-    );
-    return candidates.length > 0
-      ? [{ environmentId: environment.environmentId, label: environment.label, candidates }]
-      : [];
-  });
+  const managedOwners = useAtomValue(managedEnvironmentOwnersAtom);
+  const machines = collectProviderUpdateMachines(
+    environments.map((environment) => ({
+      environmentId: environment.environmentId,
+      label: environment.label,
+      connected: environment.connection.phase === "connected",
+      manageable: manageableIds.has(environment.environmentId),
+      managed: managedOwners.has(environment.environmentId),
+      providers: providersByEnvironment.get(environment.environmentId) ?? [],
+    })),
+  );
 
   const updateAll = async ({ quiet = false }: { readonly quiet?: boolean } = {}) => {
     const runs = await Promise.all(
@@ -158,10 +158,7 @@ export function ProviderUpdatesAction() {
       <TooltipPopup side="top">
         {machines.map((machine) => (
           <div key={machine.environmentId}>
-            {machine.label}:{" "}
-            {machine.candidates
-              .map((candidate) => PROVIDER_DISPLAY_NAMES[candidate.driver] ?? candidate.driver)
-              .join(", ")}
+            {machine.label}: {machine.candidates.map(describeProviderUpdate).join(", ")}
           </div>
         ))}
       </TooltipPopup>

@@ -149,10 +149,51 @@ export function isProviderUpdateActive(provider: Pick<ServerProvider, "updateSta
   return provider.updateState?.status === "queued" || provider.updateState?.status === "running";
 }
 
-export function collectProviderUpdateCandidates(
+function collectProviderUpdateCandidates(
   providers: ReadonlyArray<ServerProvider>,
 ): ProviderUpdateCandidate[] {
   return dedupeProvidersByDriver(providers.filter(isProviderUpdateCandidate));
+}
+
+/**
+ * "Claude 2.1.331 → 2.1.340": what an update changes, for a list of pending updates. The
+ * installed version stands alone when the newer one is not known.
+ */
+export function describeProviderUpdate(
+  provider: Pick<ServerProvider, "driver" | "version" | "installedVersion" | "versionAdvisory">,
+): string {
+  const name = PROVIDER_DISPLAY_NAMES[provider.driver] ?? provider.driver;
+  const installed =
+    provider.versionAdvisory?.currentVersion ?? provider.installedVersion ?? provider.version;
+  const available = provider.versionAdvisory?.latestVersion;
+  if (installed && available) return `${name} ${installed} → ${available}`;
+  if (installed) return `${name} ${installed}`;
+  return available ? `${name} → ${available}` : name;
+}
+
+/**
+ * The machines whose providers one click can update. A plugin-managed environment is left out:
+ * it is a disposable copy built from an image, so an update inside it is lost with it.
+ */
+export function collectProviderUpdateMachines<EnvironmentKey extends string>(
+  environments: ReadonlyArray<{
+    readonly environmentId: EnvironmentKey;
+    readonly label: string;
+    readonly connected: boolean;
+    readonly manageable: boolean;
+    readonly managed: boolean;
+    readonly providers: ReadonlyArray<ServerProvider>;
+  }>,
+) {
+  return environments.flatMap((environment) => {
+    if (!environment.connected || !environment.manageable || environment.managed) return [];
+    const candidates = collectProviderUpdateCandidates(environment.providers).filter((candidate) =>
+      canOneClickUpdateProviderCandidate(candidate, environment.providers),
+    );
+    return candidates.length > 0
+      ? [{ environmentId: environment.environmentId, label: environment.label, candidates }]
+      : [];
+  });
 }
 
 export function isProviderSettingsUpdateCandidate(
