@@ -851,6 +851,13 @@ const isProviderAdapterRuntimeRequestResponseError = Schema.is(
   ProviderAdapter.ProviderAdapterRuntimeRequestResponseError,
 );
 
+/**
+ * `1` where Codex cannot start its own sandbox, such as inside a container. Every command
+ * fails there under `readOnly` and `workspaceWrite`, so those turns tell Codex that an outer
+ * sandbox already contains it.
+ */
+const CODEX_EXTERNAL_SANDBOX_ENV = "T3CODE_CODEX_EXTERNAL_SANDBOX";
+
 function codexRuntimeModeTurnDefaults(runtimeMode: RuntimeMode): {
   readonly approvalPolicy: CodexSchema.V2TurnStartParams__AskForApproval;
   readonly approvalsReviewer: CodexSchema.V2TurnStartParams__ApprovalsReviewer;
@@ -936,10 +943,17 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
       input.runtimePolicy.approvalPolicy === undefined
         ? runtimeModeDefaults.approvalPolicy
         : yield* decodeTurnApprovalPolicy(input.runtimePolicy.approvalPolicy);
-    const baseSandboxPolicy =
+    const requestedSandboxPolicy =
       input.runtimePolicy.sandboxPolicy === undefined
         ? runtimeModeDefaults.sandboxPolicy
         : yield* decodeTurnSandboxPolicy(input.runtimePolicy.sandboxPolicy);
+    const externalSandbox = (yield* HostProcess.Environment)[CODEX_EXTERNAL_SANDBOX_ENV] === "1";
+    const baseSandboxPolicy =
+      externalSandbox &&
+      (requestedSandboxPolicy?.type === "readOnly" ||
+        requestedSandboxPolicy?.type === "workspaceWrite")
+        ? ({ type: "externalSandbox", networkAccess: "enabled" } as const)
+        : requestedSandboxPolicy;
     const extraRoots = input.runtimePolicy.workspace?.extraRoots ?? [];
     const sandboxPolicy =
       baseSandboxPolicy?.type === "workspaceWrite" && extraRoots.length > 0

@@ -197,6 +197,7 @@ describe("CodexAdapterV2 runtime policy", () => {
     Effect.gen(function* () {
       const build = (
         runtimeMode: "approval-required" | "auto-accept-edits" | "auto" | "full-access",
+        environment: NodeJS.ProcessEnv = {},
       ) =>
         CodexAdapterV2.buildCodexTurnStartParams({
           nativeThreadId: `native-${runtimeMode}`,
@@ -210,7 +211,7 @@ describe("CodexAdapterV2 runtime policy", () => {
             instanceId: ProviderInstanceId.make("codex"),
             model: "gpt-5.4",
           },
-        });
+        }).pipe(Effect.provideService(HostProcess.Environment, environment));
 
       const approvalRequired = yield* build("approval-required");
       const autoAcceptEdits = yield* build("auto-accept-edits");
@@ -237,6 +238,23 @@ describe("CodexAdapterV2 runtime policy", () => {
       });
       assert.equal(fullAccess.approvalsReviewer, "user");
       assert.equal(fullAccess.sandboxPolicy?.type, "dangerFullAccess");
+
+      // Inside a container Codex cannot start its own sandbox; the container is the sandbox.
+      const external = { type: "externalSandbox", networkAccess: "enabled" } as const;
+      for (const [runtimeMode, expected] of [
+        ["approval-required", approvalRequired],
+        ["auto-accept-edits", autoAcceptEdits],
+        ["auto", auto],
+        ["full-access", fullAccess],
+      ] as const) {
+        const contained = yield* build(runtimeMode, { T3CODE_CODEX_EXTERNAL_SANDBOX: "1" });
+        assert.deepEqual(
+          contained.sandboxPolicy,
+          runtimeMode === "full-access" ? expected.sandboxPolicy : external,
+        );
+        assert.deepEqual(contained.approvalPolicy, expected.approvalPolicy);
+        assert.equal(contained.approvalsReviewer, expected.approvalsReviewer);
+      }
     }),
   );
 
