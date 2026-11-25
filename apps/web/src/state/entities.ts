@@ -357,6 +357,16 @@ export function readThreadShell(ref: ScopedThreadRef): EnvironmentThreadShell | 
   return appAtomRegistry.get(environmentThreadShells.threadShellAtom(ref));
 }
 
+/** Resolves once the thread's messages are in this client; watching them is what loads them. */
+export function waitForThreadLoaded(ref: ScopedThreadRef, timeoutMs = 5_000): Promise<boolean> {
+  return waitForAtomValue({
+    registry: appAtomRegistry,
+    atom: environmentThreadDetails.threadAtom(ref),
+    predicate: (thread) => thread !== null,
+    timeoutMs,
+  });
+}
+
 export function waitForThreadShell(ref: ScopedThreadRef, timeoutMs = 5_000): Promise<boolean> {
   return waitForAtomValue({
     registry: appAtomRegistry,

@@ -14,7 +14,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useState, type ComponentProps, type ReactNode } from "react";
 
 import { Button } from "~/components/ui/button";
 import { Spinner } from "~/components/ui/spinner";
@@ -125,6 +125,63 @@ function headerLabel(snapshot: WorktreeSetupSnapshot, resolve: MessageResolver):
   }
 }
 
+/** One step of a setup: its state as an icon, its name, then whatever the step reports. */
+export function SetupStepRow({
+  status,
+  label,
+  trailing,
+  ...rowProps
+}: {
+  status: WorktreeSetupStage["status"];
+  label: string;
+  trailing?: ReactNode;
+} & Omit<ComponentProps<typeof WorkLogRow>, "icon" | "label" | "trailing">) {
+  const running = status === "running";
+  return (
+    <WorkLogRow
+      {...rowProps}
+      icon={
+        <span className={cn("text-icon-muted", status === "pending" && "opacity-40")}>
+          <StageIcon status={status} />
+        </span>
+      }
+      label={
+        <span
+          ref={running ? observeVisibleAnimation : undefined}
+          className={cn("relative block truncate", stageRowClassName(status))}
+        >
+          {label}
+          {running ? <ShimmerOverlay>{label}</ShimmerOverlay> : null}
+        </span>
+      }
+      trailing={trailing}
+    />
+  );
+}
+
+/** What a step reports beside its name, such as progress or the reason it was skipped. */
+export function SetupStepDetail({ children }: { children: ReactNode }) {
+  return (
+    <span className="max-w-1/2 min-w-0 truncate text-xs text-muted-foreground tabular-nums">
+      {children}
+    </span>
+  );
+}
+
+/** A note under the steps, aligned with their names: why the setup stopped. */
+export function SetupStepNote({ children }: { children: ReactNode }) {
+  return <p className="mt-1 ml-8 text-xs text-muted-foreground">{children}</p>;
+}
+
+/** The setup's controls, under the steps and aligned with their icons. */
+export function SetupStepActions({ children }: { children: ReactNode }) {
+  return (
+    <div className="mt-0.5 ml-[calc(--spacing(6)+2px-(--spacing(2)-1px))] flex flex-wrap items-center gap-0.5">
+      {children}
+    </div>
+  );
+}
+
 function SetupHeaderRow({ snapshot }: { snapshot: WorktreeSetupSnapshot }) {
   const m = useMessages();
   const running = snapshot.phase === "running";
@@ -185,30 +242,14 @@ function StageRow({
           ? `${stage.percent}%`
           : stage.detail;
   return (
-    <WorkLogRow
+    <SetupStepRow
       data-worktree-setup-stage={stage.id}
       data-worktree-setup-status={stage.status}
-      icon={
-        <span className={cn("text-icon-muted", stage.status === "pending" && "opacity-40")}>
-          <StageIcon status={stage.status} />
-        </span>
-      }
-      label={
-        <span
-          ref={running ? observeVisibleAnimation : undefined}
-          className={cn("relative block truncate", stageRowClassName(stage.status))}
-        >
-          {label}
-          {running ? <ShimmerOverlay>{label}</ShimmerOverlay> : null}
-        </span>
-      }
+      status={stage.status}
+      label={label}
       trailing={
         <>
-          {trailing ? (
-            <span className="max-w-1/2 min-w-0 truncate text-xs text-muted-foreground tabular-nums">
-              {trailing}
-            </span>
-          ) : null}
+          {trailing ? <SetupStepDetail>{trailing}</SetupStepDetail> : null}
           {stage.status !== "skipped" && stage.status !== "pending" ? (
             <span className="shrink-0 text-xs text-muted-foreground tabular-nums empty:hidden">
               <Elapsed
@@ -226,12 +267,20 @@ function StageRow({
 }
 
 const OUTPUT_TAIL_LINES = 4;
-const OUTPUT_TAIL_SLOTS = Array.from({ length: OUTPUT_TAIL_LINES }, (_, slot) => slot);
 
-function OutputTail({ lines, failed }: { lines: ReadonlyArray<string>; failed: boolean }) {
-  const rows = OUTPUT_TAIL_SLOTS.map((slot) => ({
+/** The last lines a running step printed, in a box whose height does not jump as they arrive. */
+export function OutputTail({
+  lines,
+  failed,
+  rows: rowCount = OUTPUT_TAIL_LINES,
+}: {
+  lines: ReadonlyArray<string>;
+  failed: boolean;
+  rows?: number;
+}) {
+  const rows = Array.from({ length: rowCount }, (_, slot) => ({
     slot,
-    line: lines[lines.length - OUTPUT_TAIL_LINES + slot] ?? "",
+    line: lines[lines.length - rowCount + slot] ?? "",
   }));
   return (
     <pre
@@ -369,10 +418,10 @@ export function WorktreeSetupCard({
       )}
 
       {snapshot.phase === "failed" && snapshot.error ? (
-        <p className="mt-1 ml-8 text-xs text-muted-foreground">{snapshot.error}</p>
+        <SetupStepNote>{snapshot.error}</SetupStepNote>
       ) : null}
 
-      <div className="mt-0.5 ml-[calc(--spacing(6)+2px-(--spacing(2)-1px))] flex flex-wrap items-center gap-0.5">
+      <SetupStepActions>
         <Button
           type="button"
           size="xs"
@@ -401,7 +450,7 @@ export function WorktreeSetupCard({
             <T>Cancel</T>
           </Button>
         ) : null}
-      </div>
+      </SetupStepActions>
       {detailsOpen ? <SetupDetails snapshot={snapshot} /> : null}
     </section>
   );

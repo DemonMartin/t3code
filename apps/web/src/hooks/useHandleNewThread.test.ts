@@ -14,6 +14,7 @@ const testState = vi.hoisted(() => {
     environmentSelection: undefined as "manual" | undefined,
   };
   let connectedEnvironmentIds = ["environment-primary", "environment-ssh"];
+  let managedOwners = new Map<string, string>();
   let targetSettings = {
     defaultThreadEnvMode: "local" as "local" | "worktree" | null,
     newWorktreesStartFromOrigin: false,
@@ -86,6 +87,12 @@ const testState = vi.hoisted(() => {
     disconnect(environmentId: string) {
       connectedEnvironmentIds = connectedEnvironmentIds.filter((id) => id !== environmentId);
     },
+    get managedOwners() {
+      return managedOwners;
+    },
+    manage(environmentId: string, ownerEnvironmentId: string) {
+      managedOwners = new Map([[environmentId, ownerEnvironmentId]]);
+    },
     get openDraftRoute() {
       return openDraftRoute;
     },
@@ -113,6 +120,7 @@ const testState = vi.hoisted(() => {
         environmentSelection: undefined,
       };
       connectedEnvironmentIds = ["environment-primary", "environment-ssh"];
+      managedOwners = new Map();
       targetSettings = {
         defaultThreadEnvMode: workspaceDefaults.envMode,
         newWorktreesStartFromOrigin: workspaceDefaults.startFromOrigin,
@@ -151,7 +159,9 @@ vi.mock("../rpc/atomRegistry", () => ({
     get: (atom: unknown) =>
       atom === "connected-environment-ids"
         ? testState.connectedEnvironmentIds
-        : testServerConfigs(),
+        : atom === "managed-plugin-environments"
+          ? testState.managedOwners
+          : testServerConfigs(),
   },
 }));
 
@@ -232,6 +242,15 @@ vi.mock("../lib/utils", () => ({
 vi.mock("@t3tools/client-runtime/state/project-grouping", () => ({
   deriveLogicalProjectKeyFromSettings: () => "remote-project",
   getProjectOrderKey: () => "remote-project",
+  // Every test project shares one group, so the owner's member is its only project.
+  resolveManagedEnvironmentOwnerProject: (
+    project: { environmentId: string },
+    projects: { environmentId: string }[],
+    managedOwners: ReadonlyMap<string, string>,
+  ) =>
+    projects.find(
+      (candidate) => candidate.environmentId === managedOwners.get(project.environmentId),
+    ) ?? project,
   selectProjectGroupingSettings: () => ({}),
 }));
 vi.mock("../state/entities", () => {
@@ -242,8 +261,14 @@ vi.mock("../state/entities", () => {
     defaultThreadEnvMode: null,
     defaultModelSelection: null,
   };
+  const ownerProject = {
+    ...project,
+    id: "project-owner",
+    environmentId: "environment-primary",
+    workspaceRoot: "/owner/project",
+  };
   return {
-    readProjects: () => [project],
+    readProjects: () => [project, ownerProject],
     readThreadShell: () => null,
     readThreadShells: () => [],
     useProjects: () => [],
@@ -252,6 +277,9 @@ vi.mock("../state/entities", () => {
 });
 vi.mock("../state/projects", () => ({ defaultProjectFallbackReadyAtom: () => true }));
 vi.mock("../state/olderSettledShelf", () => ({ readUnloadedThreadCount: () => 0 }));
+vi.mock("../state/plugins", () => ({
+  managedEnvironmentOwnersAtom: "managed-plugin-environments",
+}));
 vi.mock("../state/presentation", () => ({
   environmentSummaries: { connectedEnvironmentIdsAtom: "connected-environment-ids" },
 }));
@@ -401,6 +429,29 @@ describe("useNewThreadHandler", () => {
     );
   });
 
+  it("opens a draft from a plugin-managed environment on the environment that owns it", async () => {
+    const sandboxRef = { environmentId: "environment-ssh", projectId: "project-remote" } as never;
+    testState.reset(null);
+    testState.manage("environment-ssh", "environment-primary");
+
+    await useNewThreadHandler()(sandboxRef);
+    expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenLastCalledWith(
+      "remote-project",
+      { environmentId: "environment-primary", projectId: "project-owner" },
+      "draft-delayed",
+      expect.anything(),
+    );
+
+    // An existing worktree is a path on the machine that holds it.
+    await useNewThreadHandler()(sandboxRef, { worktreePath: "/remote/worktree" });
+    expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenLastCalledWith(
+      "remote-project",
+      sandboxRef,
+      "draft-delayed",
+      expect.objectContaining({ worktreePath: "/remote/worktree" }),
+    );
+  });
+
   it("opens the draft without waiting on a project file from an offline machine", async () => {
     testState.reset(null, { envMode: null, startFromOrigin: false });
     testState.disconnect("environment-ssh");
@@ -441,6 +492,17 @@ describe("default project selection", () => {
       environmentId: "first",
       projectId: "project",
     });
+    // Right after a reload only the saved connection says the last used project is a sandbox's.
+    expect(
+      resolveDefaultProjectRef(
+        projects,
+        [],
+        "last-used:project",
+        true,
+        {} as never,
+        new Map([["last-used", "first"]]),
+      ),
+    ).toEqual({ environmentId: "first", projectId: "project" });
     expect(
       resolveDefaultProjectRef(
         [projects[0]!, { ...projects[1]!, archivedAt: "2026-11-09T00:00:00.000Z" }],

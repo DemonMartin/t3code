@@ -96,6 +96,9 @@ export function V2LifecycleRow(props: {
       />
     );
   }
+  if (item.type === "system_notice") {
+    return <TimelineSystemDivider label={item.message} />;
+  }
   if (item.type === "handoff") {
     return (
       <EnvironmentHandoffRow

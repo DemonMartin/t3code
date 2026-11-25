@@ -235,6 +235,10 @@ export interface DismissThreadUserInputInput extends ThreadCommandInput {
   readonly requestId: RuntimeRequestId;
 }
 
+export interface RecordThreadEnvironmentNoticeInput extends ThreadCommandInput {
+  readonly text: string;
+}
+
 export interface RevertThreadCheckpointInput extends ThreadCommandInput {
   readonly restoreFiles?: boolean;
   readonly checkpointId?: string;
@@ -1046,6 +1050,18 @@ export const dismissThreadUserInput = Effect.fn("EnvironmentCommands.dismissThre
     });
   },
 );
+
+/** Notes in a thread that a setting of its environment changed; it shows like a model change. */
+export const recordThreadEnvironmentNotice = Effect.fn(
+  "EnvironmentCommands.recordThreadEnvironmentNotice",
+)(function* (input: RecordThreadEnvironmentNoticeInput) {
+  return yield* dispatch({
+    type: "thread.environment-notice.record",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    text: input.text,
+  });
+});
 
 export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThreadCheckpoint")(
   function* (input: RevertThreadCheckpointInput) {

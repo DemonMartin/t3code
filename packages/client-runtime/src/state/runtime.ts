@@ -33,6 +33,7 @@ import {
   type EnvironmentSubscriptionRpcTag,
   type EnvironmentUnaryRpcTag,
   EnvironmentRpcUnavailableError,
+  awaitSession,
   request,
   requestGuarded,
   RpcPermissionGuard,
@@ -990,6 +991,20 @@ export function createEnvironmentSubscriptionAtomFamily<R, ER, Input, A, E>(
     family(environmentRpcKey(target));
 }
 
+/**
+ * Starts an environment that is stopped on purpose, such as an idle plugin-managed sandbox,
+ * before a command reaches it. Resolves true once it started one, and fails naming the
+ * environment when it did not come back. Only commands ask: queries and streams start nothing.
+ */
+export type EnvironmentWake = (
+  environmentId: EnvironmentIdType,
+) => Effect.Effect<boolean, EnvironmentRpcUnavailableError>;
+
+/** The wake a client installs; held as a field because an atom would call a bare function. */
+export const environmentWakeAtom = Atom.make<{ readonly wake: EnvironmentWake }>({
+  wake: () => Effect.succeed(false),
+}).pipe(Atom.keepAlive, Atom.withLabel("environment-wake"));
+
 export function createEnvironmentCommand<R, ER, Input, A, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry.EnvironmentRegistry | R, ER>,
   options: EnvironmentCommandAtomOptions<
@@ -1004,9 +1019,14 @@ export function createEnvironmentCommand<R, ER, Input, A, E>(
     ...(options.scheduler === undefined ? {} : { scheduler: options.scheduler }),
     ...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
     execute: (target, registry) =>
-      runInEnvironment(
-        target.environmentId,
-        options.execute(target.input, registry, target.environmentId),
+      Effect.suspend(() => registry.get(environmentWakeAtom).wake(target.environmentId)).pipe(
+        Effect.flatMap((woke) => {
+          const command = options.execute(target.input, registry, target.environmentId);
+          return runInEnvironment(
+            target.environmentId,
+            woke ? awaitSession("30 seconds").pipe(Effect.andThen(command)) : command,
+          );
+        }),
       ),
   });
 }

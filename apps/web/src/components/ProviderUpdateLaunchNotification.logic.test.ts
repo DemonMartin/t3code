@@ -10,6 +10,8 @@ import { AsyncResult } from "effect/reactivity";
 
 import {
   canOneClickUpdateProviderCandidate,
+  collectProviderUpdateMachines,
+  describeProviderUpdate,
   getProviderUpdateRunToastView,
   getProviderUpdateSidebarPillView,
   hasOneClickUpdateProviderCandidate,
@@ -346,6 +348,45 @@ it("does not offer incompatible latest versions and restores suggestions after p
     expect(isProviderUpdateCandidate(snapshot)).toBe(expected);
     expect(isProviderSettingsUpdateCandidate(snapshot)).toBe(expected);
   }
+});
+
+describe("machines offered a provider update", () => {
+  const outdated = [
+    provider({ driver: driver("claudeAgent"), version: "2.1.331", latestVersion: "2.1.340" }),
+  ];
+  const machine = (environmentId: string, overrides: { managed?: boolean } = {}) => ({
+    environmentId,
+    label: environmentId,
+    connected: true,
+    manageable: true,
+    managed: false,
+    providers: outdated,
+    ...overrides,
+  });
+
+  it("leaves out plugin-managed environments, which are rebuilt rather than updated", () => {
+    const machines = collectProviderUpdateMachines([
+      machine("workstation"),
+      machine("sandbox-a", { managed: true }),
+      { ...machine("offline"), connected: false },
+      { ...machine("read-only"), manageable: false },
+      { ...machine("current"), providers: [] },
+    ]);
+    expect(machines.map(({ environmentId }) => environmentId)).toEqual(["workstation"]);
+    expect(machines[0]?.candidates.map(describeProviderUpdate)).toEqual([
+      "Claude 2.1.331 → 2.1.340",
+    ]);
+  });
+
+  it("names the installed version alone when the newer one is unknown", () => {
+    const [current] = outdated;
+    expect(
+      describeProviderUpdate({
+        ...current!,
+        versionAdvisory: { ...current!.versionAdvisory!, latestVersion: null },
+      }),
+    ).toBe("Claude 2.1.331");
+  });
 });
 
 describe("getProviderUpdateRunToastView", () => {

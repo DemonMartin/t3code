@@ -701,6 +701,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "runtime-request.respond":
     case "runtime-request.delivery.fail":
     case "thread.user-input.dismiss":
+    case "thread.environment-notice.record":
     case "checkpoint.rollback":
     case "thread.worktree-cleanup.fail":
     case "thread.moved":
@@ -15175,6 +15176,53 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
   });
 
+  const dispatchThreadEnvironmentNotice = Effect.fn("Orchestrator.dispatchThreadEnvironmentNotice")(
+    function* (
+      command: Extract<
+        OrchestrationV2Command,
+        { readonly type: "thread.environment-notice.record" }
+      >,
+      events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    ) {
+      const projection = yield* projectionStore
+        .getThreadRecords(command.threadId, ["runs"])
+        .pipe(mapDispatchError(command));
+      const now = yield* DateTime.now;
+      const latestRun = projection.runs
+        .filter((run) => run.status !== "rolled_back")
+        .sort((a, b) => b.ordinal - a.ordinal)[0];
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "turn-item.updated",
+        threadId: command.threadId,
+        providerInstanceId: projection.thread.providerInstanceId,
+        occurredAt: now,
+        payload: {
+          id: TurnItemId.make(`item:environment-notice:${command.commandId}`),
+          threadId: command.threadId,
+          runId: latestRun?.id ?? null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 0,
+          type: "system_notice",
+          message: command.text,
+          level: "info",
+          about: "environment",
+          status: "completed",
+          title: null,
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+        },
+      });
+    },
+  );
+
   const dispatchCheckpointRollbackFail = Effect.fn("Orchestrator.dispatchCheckpointRollbackFail")(
     function* (
       command: Extract<
@@ -16454,6 +16502,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "thread.user-input.dismiss":
         yield* dispatchThreadUserInputDismiss(command, events, effects);
+        break;
+      case "thread.environment-notice.record":
+        yield* dispatchThreadEnvironmentNotice(command, events);
         break;
       case "subagent.stop":
         yield* dispatchSubagentStop(command, events, effects);

@@ -23,6 +23,7 @@ import {
   isBranchHoldCurrent,
   offersWorkspaceModes,
   toBranchActionErrorMessage,
+  withoutManagedEnvironments,
 } from "./BranchToolbar.logic";
 
 describe("toBranchActionErrorMessage", () => {
@@ -473,5 +474,27 @@ describe("resolveConfirmedSelectedRef", () => {
     expect(resolveConfirmedSelectedRef(listed, refs === null ? null : { refs }).worktreePath).toBe(
       expected,
     );
+  });
+});
+
+describe("withoutManagedEnvironments", () => {
+  const environments = [
+    { environmentId: "controller" },
+    { environmentId: "sandbox-a" },
+    { environmentId: "laptop" },
+    { environmentId: "sandbox-b" },
+  ];
+  const managed = new Set(["sandbox-a", "sandbox-b"]);
+  const ids = (activeEnvironmentId: string) =>
+    withoutManagedEnvironments(environments, managed, activeEnvironmentId).map(
+      (environment) => environment.environmentId,
+    );
+
+  it("offers a draft only machines no plugin manages", () => {
+    expect(ids("controller")).toEqual(["controller", "laptop"]);
+  });
+
+  it("keeps the managed environment a thread already lives on", () => {
+    expect(ids("sandbox-b")).toEqual(["controller", "laptop", "sandbox-b"]);
   });
 });

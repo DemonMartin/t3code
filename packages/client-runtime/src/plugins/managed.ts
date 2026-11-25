@@ -10,6 +10,20 @@ import type { ConnectionCatalogEntry, PluginConnectionOwner } from "../connectio
 export interface ManagedPluginEnvironment extends PluginManagedEnvironment {
   readonly owner: PluginConnectionOwner;
   readonly command: PluginCommandInput;
+  /** Set when the plugin offers `resume` and registered its command. */
+  readonly resumeCommand?: PluginCommandInput;
+}
+
+/**
+ * What reaching a managed environment takes first: its plugin's resume command while it is
+ * stopped, or waiting while it starts. Only something the user does asks this; listing, syncing
+ * and drafts never start an environment.
+ */
+export function managedEnvironmentWakeStep(
+  resource: Pick<ManagedPluginEnvironment, "state" | "resumeCommand"> | undefined,
+): "resume" | "wait" | null {
+  if (resource?.state === "stopped") return resource.resumeCommand ? "resume" : null;
+  return resource?.state === "starting" ? "wait" : null;
 }
 
 export function createManagedPluginConnections(ports: {
@@ -153,4 +167,26 @@ export function createManagedPluginConnections(ports: {
       closed = true;
     },
   };
+}
+
+/**
+ * The owning environment of each plugin-managed environment. A saved connection names its owner
+ * as soon as the catalog loads; a plugin's live list arrives later and adds those not connected yet.
+ */
+export function managedEnvironmentOwners(
+  entries: ReadonlyMap<EnvironmentId, ConnectionCatalogEntry>,
+  resources: ReadonlyArray<Pick<ManagedPluginEnvironment, "environmentId" | "owner">>,
+): ReadonlyMap<string, string> {
+  const owners = new Map<string, string>();
+  for (const [environmentId, entry] of entries) {
+    for (const route of connectionRoutes(entry)) {
+      const profile = Option.getOrNull(route.profile);
+      if (profile?._tag === "BearerConnectionProfile" && profile.managedBy)
+        owners.set(environmentId, profile.managedBy.environmentId);
+    }
+  }
+  for (const resource of resources)
+    if (resource.environmentId !== resource.owner.environmentId)
+      owners.set(resource.environmentId, resource.owner.environmentId);
+  return owners;
 }

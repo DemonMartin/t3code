@@ -410,7 +410,11 @@ function SidebarUpdateControl() {
     );
   };
 
-  if (!isElectron && !runsEverything && !isRunningEverything) return null;
+  // The confirmation re-checks every machine, so what there is to update can briefly be nothing
+  // while it is open. Returning null then would unmount it, and reopen it a moment later.
+  if (!isElectron && !runsEverything && !isRunningEverything && !isConfirmingEverything) {
+    return null;
+  }
 
   const statusIcon = (
     <DesktopUpdateStatusIcon

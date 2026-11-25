@@ -24,6 +24,8 @@ import {
   deriveLogicalProjectKeyFromSettings,
   getProjectOrderKey,
   resolveGroupDefaultProject,
+  resolveManagedEnvironmentOwnerProject,
+  selectNewDraftProject,
   selectProjectGroupingSettings,
   type ProjectGroupingSettings,
 } from "@t3tools/client-runtime/state/project-grouping";
@@ -46,6 +48,7 @@ import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { trackPendingWorkspaceDefault } from "../lib/draftWorkspaceDefaults";
 import { peekT3ProjectFile, readT3ProjectFile } from "../lib/t3ProjectFileDefaults";
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import { managedEnvironmentOwnersAtom } from "../state/plugins";
 import { environmentSummaries } from "../state/presentation";
 import { environmentServerConfigsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
@@ -91,6 +94,31 @@ function pickExplicitWorkspaceOptions(options: NewThreadWorkspaceOptions | undef
   };
 }
 
+/** A draft opened from a plugin-managed environment starts on the environment that owns it. */
+function resolveNewDraftProjectRef(
+  projectRef: ScopedProjectRef,
+  input: {
+    readonly projects: ReadonlyArray<EnvironmentProject>;
+    readonly managedOwners: ReadonlyMap<string, string>;
+    readonly settings: ProjectGroupingSettings;
+    readonly keepEnvironment: boolean;
+  },
+): ScopedProjectRef {
+  if (input.keepEnvironment) return projectRef;
+  const project = input.projects.find(
+    (candidate) =>
+      candidate.id === projectRef.projectId && candidate.environmentId === projectRef.environmentId,
+  );
+  if (!project) return projectRef;
+  const owner = resolveManagedEnvironmentOwnerProject(
+    project,
+    input.projects,
+    input.managedOwners,
+    input.settings,
+  );
+  return owner === project ? projectRef : scopeProjectRef(owner.environmentId, owner.id);
+}
+
 export function useNewThreadHandler() {
   return createNewThreadHandler(useRouter());
 }
@@ -104,7 +132,7 @@ export function createNewThreadHandler(router: AnyRouter) {
   };
 
   return (
-    projectRef: ScopedProjectRef,
+    requestedProjectRef: ScopedProjectRef,
     options?: {
       branch?: string | null;
       worktreePath?: string | null;
@@ -117,6 +145,13 @@ export function createNewThreadHandler(router: AnyRouter) {
   ): Promise<{ draftId: DraftId; threadId: ThreadId } | null> => {
     const projects = readProjects();
     const projectGroupingSettings = selectProjectGroupingSettings(getClientSettings());
+    const projectRef = resolveNewDraftProjectRef(requestedProjectRef, {
+      projects,
+      managedOwners: appAtomRegistry.get(managedEnvironmentOwnersAtom),
+      settings: projectGroupingSettings,
+      // An existing worktree is a path on the machine that holds it.
+      keepEnvironment: typeof options?.worktreePath === "string",
+    });
     // Read at call time; status pushes replace the config map and would recreate every sidebar handler.
     const environmentServerConfigs = appAtomRegistry.get(environmentServerConfigsAtom);
     const targetServerSettings =
@@ -432,22 +467,35 @@ export function createNewThreadHandler(router: AnyRouter) {
   };
 }
 
+const NO_MANAGED_ENVIRONMENTS: ReadonlyMap<string, string> = new Map();
+
 export function resolveDefaultProjectRef(
   projects: ReadonlyArray<EnvironmentProject>,
   projectOrder: readonly string[],
   lastUsedProjectKey: string | null,
   fallbackReady = true,
   groupingSettings?: ProjectGroupingSettings,
+  managedOwners = NO_MANAGED_ENVIRONMENTS,
 ): ScopedProjectRef | null {
-  const lastUsed = projects.find(
+  const liveProjects = projects.filter((project) => project.archivedAt == null);
+  const lastUsed = liveProjects.find(
     (project) =>
-      project.archivedAt == null &&
       scopedProjectKey(scopeProjectRef(project.environmentId, project.id)) === lastUsedProjectKey,
   );
-  if (lastUsed) return scopeProjectRef(lastUsed.environmentId, lastUsed.id);
+  if (lastUsed) {
+    // A key saved while viewing a sandbox thread still names the sandbox's project.
+    const owner = groupingSettings
+      ? resolveManagedEnvironmentOwnerProject(
+          lastUsed,
+          liveProjects,
+          managedOwners,
+          groupingSettings,
+        )
+      : lastUsed;
+    return scopeProjectRef(owner.environmentId, owner.id);
+  }
   if (!fallbackReady) return null;
-  const liveProjects = projects.filter((project) => project.archivedAt == null);
-  const [firstProject] = orderItemsByPreferredIds({
+  const ordered = orderItemsByPreferredIds({
     items: liveProjects,
     preferredIds: projectOrder,
     getId: getProjectOrderKey,
@@ -456,6 +504,9 @@ export function resolveDefaultProjectRef(
       legacyProjectCwdPreferenceKey(project.workspaceRoot),
     ],
   });
+  const firstProject =
+    (groupingSettings ? selectNewDraftProject(ordered, managedOwners, groupingSettings) : null) ??
+    ordered[0];
   if (!firstProject) return null;
   const defaultProject = groupingSettings
     ? resolveGroupDefaultProject(firstProject, liveProjects, groupingSettings)
@@ -488,12 +539,14 @@ export function useHandleNewThread() {
   const projects = useProjects();
   const handleNewThread = useNewThreadHandler();
   const groupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const managedOwners = useAtomValue(managedEnvironmentOwnersAtom);
   const defaultProjectRef = resolveDefaultProjectRef(
     projects,
     projectOrder,
     lastUsedProjectKey,
     defaultProjectFallbackReady,
     groupingSettings,
+    managedOwners,
   );
 
   return {

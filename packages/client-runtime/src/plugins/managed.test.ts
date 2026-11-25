@@ -3,7 +3,12 @@ import { EnvironmentId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { BearerConnectionProfile, type ConnectionCatalogEntry } from "../connection/catalog.ts";
 import { BearerConnectionTarget } from "../connection/model.ts";
-import { createManagedPluginConnections, type ManagedPluginEnvironment } from "./managed.ts";
+import {
+  createManagedPluginConnections,
+  managedEnvironmentOwners,
+  managedEnvironmentWakeStep,
+  type ManagedPluginEnvironment,
+} from "./managed.ts";
 const controller = EnvironmentId.make("controller");
 const guest = EnvironmentId.make("guest");
 const owner = { environmentId: controller, pluginId: "sandboxes" };
@@ -133,4 +138,34 @@ it("does not treat a remote controller Docker loopback address as local", async 
   await actor.reconcile([source({ url: "http://127.0.0.1:1234" })], new Map());
   expect(requests).toBe(0);
   actor.close();
+});
+it("knows who owns a managed environment from its saved connection, before any plugin answers", () => {
+  // At startup the catalog is ready while the plugin's own list is still loading.
+  const entries = new Map([
+    [guest, saved()],
+    [controller, { ...saved(false), enabled: true }],
+  ]);
+  expect([...managedEnvironmentOwners(entries, [])]).toEqual([[guest, controller]]);
+  expect([...managedEnvironmentOwners(new Map([[guest, saved(false)]]), [])]).toEqual([]);
+  // A sandbox the plugin lists is known before this client has connected to it.
+  const pending = EnvironmentId.make("pending");
+  expect([
+    ...managedEnvironmentOwners(entries, [source({ environmentId: pending }), source()]),
+  ]).toEqual([
+    [guest, controller],
+    [pending, controller],
+  ]);
+});
+it("starts a managed environment only while it is stopped and its plugin can resume it", () => {
+  const resumeCommand = source().command;
+  expect(managedEnvironmentWakeStep(source({ state: "stopped", resumeCommand }))).toBe("resume");
+  // Without a resume command the plugin gave no way back: the connection fails as before.
+  expect(managedEnvironmentWakeStep(source({ state: "stopped" }))).toBeNull();
+  // Someone already started it; a command only has to wait.
+  expect(managedEnvironmentWakeStep(source({ state: "starting", resumeCommand }))).toBe("wait");
+  for (const state of ["running", "stopping", "deleting", "deleted", "error"] as const) {
+    expect(managedEnvironmentWakeStep(source({ state, resumeCommand }))).toBeNull();
+  }
+  // Not a managed environment, or its plugin has not answered yet.
+  expect(managedEnvironmentWakeStep(undefined)).toBeNull();
 });

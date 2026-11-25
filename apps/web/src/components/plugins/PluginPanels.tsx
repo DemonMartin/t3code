@@ -6,6 +6,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { clientNoticeRoutingConflicted } from "@t3tools/client-runtime/notificationRouting";
+import { managedEnvironmentStatusAtom } from "../../state/managedEnvironmentWake";
 import { pluginCatalogsAtom } from "../../state/plugins";
 import { PluginManagement } from "./PluginManagement";
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
@@ -71,8 +72,10 @@ export function PluginPanels({
   const query = serverEnvironment.pluginCatalog({ environmentId, input: {} });
   const result = useAtomValue(query);
   const catalog = Option.getOrNull(AsyncResult.value(result));
+  // A stopped sandbox answers nothing; the thread already says that it is starting.
+  const environmentStopped = useAtomValue(managedEnvironmentStatusAtom(environmentId)) !== null;
   if (!catalog)
-    return result._tag === "Failure" ? (
+    return result._tag === "Failure" && !environmentStopped ? (
       <p role="status">
         <T>Plugins could not be loaded.</T>
       </p>

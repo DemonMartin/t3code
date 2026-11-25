@@ -15,8 +15,19 @@ import { msg, T, useGT, useMessages } from "gt-react";
 import { m as resolveMessage } from "../i18n/messages";
 import { useAtomValue } from "@effect/atom-react";
 import { pluginCatalogsAtom } from "../state/plugins";
+import { pluginEnvironmentLaunchers } from "@t3tools/client-runtime/plugins";
+import { type PluginAutoLaunchControl, usePluginAutoLauncher } from "./chat/usePluginAutoLaunch";
+import type { PluginLaunchOptionsControl } from "./chat/usePluginLaunchOptions";
+import { PluginLaunchOptionPickers } from "./plugins/PluginLaunchOptionPickers";
 import type { PluginInput, EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
-import { FolderGit2Icon, FolderGitIcon, FolderIcon, PlusIcon, ScaleIcon } from "lucide-react";
+import {
+  BoxIcon,
+  FolderGit2Icon,
+  FolderGitIcon,
+  FolderIcon,
+  PlusIcon,
+  ScaleIcon,
+} from "lucide-react";
 import {
   type Ref,
   type MouseEvent as ReactMouseEvent,
@@ -92,6 +103,8 @@ export interface BranchToolbarHandle {
 }
 
 interface BranchToolbarProps {
+  /** The settings the draft's launcher offers, shown beside Run on while it is the target. */
+  launchOptions?: PluginLaunchOptionsControl | undefined;
   pluginLaunchContext?: () => PluginInput;
   onPluginLaunchAccepted?: (input: PluginInput) => void;
   layout?: "composer" | "panel";
@@ -160,9 +173,14 @@ function showWorkspaceContextMenu(event: ReactMouseEvent, workspacePath: string)
     });
 }
 
+// Cannot collide with a server-minted environment ID.
+const AUTO_LAUNCH_VALUE = "action:auto-launch";
+
 interface RunContextSelectorProps {
   launcherContext?: () => PluginInput;
   onLaunchAccepted?: (input: PluginInput) => void;
+  /** Set while the draft's first send starts through a launcher instead of a machine. */
+  autoLaunch?: PluginAutoLaunchControl;
   displayMode?: "toolbar" | "panel";
   workspaceRoot?: string;
   forceNewWorktree: boolean;
@@ -191,6 +209,7 @@ const RunContextSelector = memo(function RunContextSelector({
   displayMode = "toolbar",
   launcherContext,
   onLaunchAccepted,
+  autoLaunch,
   workspaceRoot,
   forceNewWorktree: requestedForceNewWorktree,
   offersWorkspaceModes,
@@ -217,16 +236,11 @@ const RunContextSelector = memo(function RunContextSelector({
   const catalogs = useAtomValue(pluginCatalogsAtom);
   const launchers =
     launcherContext && !envLocked
-      ? (
-          catalogs.find((row) => row.environmentId === environmentId)?.catalog?.plugins ?? []
-        ).flatMap((plugin) =>
-          plugin.status === "active"
-            ? plugin.views
-                .filter((view) => view.location === "environment-launcher")
-                .map((view) => ({ pluginId: plugin.id, viewId: view.id, title: view.title }))
-            : [],
+      ? pluginEnvironmentLaunchers(
+          catalogs.find((row) => row.environmentId === environmentId)?.catalog,
         )
       : [];
+  const autoLaunchTitle = autoLaunch?.active ? autoLaunch.launcher.title : undefined;
   const [launch, setLaunch] = useState<{
     pluginId: string;
     viewId: string;
@@ -235,6 +249,7 @@ const RunContextSelector = memo(function RunContextSelector({
   const composerFloatingLayerProps = useComposerMenuProps();
   const activeEnvironment =
     availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null;
+  const runOnLabel = autoLaunchTitle ?? autoEnvironmentLabel ?? activeEnvironment?.label;
   // A folder no worktree can come from runs threads in place, whatever mode was requested.
   const forceNewWorktree = offersWorkspaceModes && requestedForceNewWorktree;
   const effectiveEnvMode = offersWorkspaceModes ? requestedEnvMode : "local";
@@ -252,6 +267,10 @@ const RunContextSelector = memo(function RunContextSelector({
         ? resolveEnvModeLabel("worktree", m)
         : resolveCurrentWorkspaceLabel(activeWorktreePath, m);
   const isPanel = displayMode === "panel";
+  // A launcher gives its thread a checkout of its own, so this machine's workspace says nothing.
+  const runContextLabel = [runOnLabel, autoLaunchTitle === undefined ? workspaceLabel : null]
+    .filter(Boolean)
+    .join(", ");
   const workspaceModesLocked = envModeLocked || !offersWorkspaceModes;
   const isLocked =
     envLocked ||
@@ -282,9 +301,14 @@ const RunContextSelector = memo(function RunContextSelector({
   const environmentIcon = (
     <SharedTooltipTrigger
       render={<span className="inline-flex shrink-0" />}
-      label={autoEnvironmentLabel ?? activeEnvironment?.label ?? gt("Run on")}
+      label={runOnLabel ?? gt("Run on")}
     >
-      {autoEnvironmentLabel ? (
+      {autoLaunchTitle !== undefined ? (
+        <BoxIcon
+          className={isPanel ? THREAD_DETAILS_PANEL_ICON_CLASS : "size-3 shrink-0"}
+          aria-hidden="true"
+        />
+      ) : autoEnvironmentLabel ? (
         <ScaleIcon
           className={isPanel ? THREAD_DETAILS_PANEL_ICON_CLASS : "size-3 shrink-0"}
           aria-hidden="true"
@@ -305,11 +329,12 @@ const RunContextSelector = memo(function RunContextSelector({
     <>
       {icon}
       <ComposerContextLabel displayMode={displayMode}>
-        {autoEnvironmentLabel ??
+        {autoLaunchTitle ??
+          autoEnvironmentLabel ??
           (showEnvironmentIndicator ? (activeEnvironment?.label ?? gt("Run on")) : workspaceLabel)}
       </ComposerContextLabel>
       {/* Trailing in the panel, so every row label starts on the same edge. */}
-      {isPanel && showEnvironmentIndicator ? workspaceIcon : null}
+      {isPanel && showEnvironmentIndicator && autoLaunchTitle === undefined ? workspaceIcon : null}
     </>
   );
 
@@ -325,9 +350,7 @@ const RunContextSelector = memo(function RunContextSelector({
         aria-label={
           isPanel
             ? gt("Run context: {context}", {
-                context: [autoEnvironmentLabel ?? activeEnvironment?.label, workspaceLabel]
-                  .filter(Boolean)
-                  .join(", "),
+                context: runContextLabel,
               })
             : undefined
         }
@@ -355,9 +378,7 @@ const RunContextSelector = memo(function RunContextSelector({
           aria-label={
             isPanel
               ? gt("Run context: {context}", {
-                  context: [autoEnvironmentLabel ?? activeEnvironment?.label, workspaceLabel]
-                    .filter(Boolean)
-                    .join(", "),
+                  context: runContextLabel,
                 })
               : undefined
           }
@@ -391,12 +412,22 @@ const RunContextSelector = memo(function RunContextSelector({
                   <T>Run on</T>
                 </MenuGroupLabel>
                 <MenuRadioGroup
-                  value={autoEnvironmentLabel ? "auto" : environmentId}
-                  onValueChange={(value) =>
-                    value === "auto"
-                      ? onAutoEnvironment?.()
-                      : onEnvironmentChange?.(value as EnvironmentId)
+                  value={
+                    autoLaunchTitle !== undefined
+                      ? AUTO_LAUNCH_VALUE
+                      : autoEnvironmentLabel
+                        ? "auto"
+                        : environmentId
                   }
+                  onValueChange={(value) => {
+                    if (value === AUTO_LAUNCH_VALUE) {
+                      autoLaunch?.setActive(true);
+                      return;
+                    }
+                    autoLaunch?.setActive(false);
+                    if (value === "auto") onAutoEnvironment?.();
+                    else onEnvironmentChange?.(value as EnvironmentId);
+                  }}
                 >
                   {onAutoEnvironment && (
                     <MenuRadioItem
@@ -430,22 +461,36 @@ const RunContextSelector = memo(function RunContextSelector({
                       </span>
                     </MenuRadioItem>
                   ))}
+                  {autoLaunch ? (
+                    <MenuRadioItem value={AUTO_LAUNCH_VALUE} closeOnClick>
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <BoxIcon className="size-3" aria-hidden="true" />
+                        <span className="min-w-0 truncate">{autoLaunch.launcher.title}</span>
+                      </span>
+                    </MenuRadioItem>
+                  ) : null}
                 </MenuRadioGroup>
-                {launchers.map((launcher) => (
-                  <MenuItem
-                    key={`${launcher.pluginId}:${launcher.viewId}`}
-                    onClick={() => {
-                      if (launcherContext)
-                        setLaunch({
-                          ...launcher,
-                          context: { ...launcherContext(), requestId: randomUUID() },
-                        });
-                    }}
-                  >
-                    <PlusIcon className="size-3" />
-                    {launcher.title}
-                  </MenuItem>
-                ))}
+                {launchers
+                  .filter(
+                    (launcher) =>
+                      launcher.pluginId !== autoLaunch?.launcher.pluginId ||
+                      launcher.viewId !== autoLaunch.launcher.viewId,
+                  )
+                  .map((launcher) => (
+                    <MenuItem
+                      key={`${launcher.pluginId}:${launcher.viewId}`}
+                      onClick={() => {
+                        if (launcherContext)
+                          setLaunch({
+                            ...launcher,
+                            context: { ...launcherContext(), requestId: randomUUID() },
+                          });
+                      }}
+                    >
+                      <BoxIcon className="size-3" />
+                      {launcher.title}
+                    </MenuItem>
+                  ))}
                 {addTargets.length > 0 ? (
                   <MenuSub>
                     <MenuSubTrigger>
@@ -697,6 +742,7 @@ function useLabelsOverflow(): readonly [
 
 export const BranchToolbar = memo(function BranchToolbar({
   layout = "composer",
+  launchOptions,
   pluginLaunchContext,
   onPluginLaunchAccepted,
   panelSection = "all",
@@ -780,11 +826,15 @@ export const BranchToolbar = memo(function BranchToolbar({
   const catalogs = useAtomValue(pluginCatalogsAtom);
   const hasLaunchers =
     !isServerThread &&
-    (catalogs.find((row) => row.environmentId === environmentId)?.catalog?.plugins ?? []).some(
-      (plugin) =>
-        plugin.status === "active" &&
-        plugin.views.some((view) => view.location === "environment-launcher"),
-    );
+    pluginEnvironmentLaunchers(catalogs.find((row) => row.environmentId === environmentId)?.catalog)
+      .length > 0;
+  const autoLaunch = usePluginAutoLauncher({
+    environmentId,
+    threadId,
+    unsentDraft: !isServerThread && !envLocked,
+  });
+  // A launcher gives its thread a checkout of its own: only the branch it starts from applies.
+  const offersWorkspaceModes = showGitControls && autoLaunch?.active !== true;
   const addTargets = useAddProjectTargets(activeProject, availableEnvironments);
   const onAddToMachine = (targetEnvironmentId: EnvironmentId | null) =>
     openAddProjectToMachine({ projectRef: activeProjectRef, targetEnvironmentId });
@@ -807,7 +857,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   if (!activeProject) return null;
 
   const startsNewWorktree =
-    showGitControls && effectiveEnvMode === "worktree" && activeWorktreePath === null;
+    offersWorkspaceModes && effectiveEnvMode === "worktree" && activeWorktreePath === null;
   const offersRepositoryChoice =
     startsNewWorktree &&
     !isServerThread &&
@@ -828,10 +878,11 @@ export const BranchToolbar = memo(function BranchToolbar({
                 }
               : {})}
             {...(onPluginLaunchAccepted ? { onLaunchAccepted: onPluginLaunchAccepted } : {})}
+            {...(autoLaunch ? { autoLaunch } : {})}
             displayMode="panel"
             workspaceRoot={activeProject.workspaceRoot}
             forceNewWorktree={forceNewWorktree}
-            offersWorkspaceModes={showGitControls}
+            offersWorkspaceModes={offersWorkspaceModes}
             autoEnvironmentLabel={autoEnvironmentLabel}
             onAutoEnvironment={onAutoEnvironment}
             envLocked={envLocked}
@@ -850,6 +901,9 @@ export const BranchToolbar = memo(function BranchToolbar({
             addTargets={addTargets}
             onAddToMachine={onAddToMachine}
           />
+        ) : null}
+        {panelSection !== "branch" && launchOptions ? (
+          <PluginLaunchOptionPickers control={launchOptions} displayMode="panel" />
         ) : null}
         {panelSection !== "workspace" ? (
           <BranchToolbarBranchSelector
@@ -890,8 +944,9 @@ export const BranchToolbar = memo(function BranchToolbar({
                 }
               : {})}
             {...(onPluginLaunchAccepted ? { onLaunchAccepted: onPluginLaunchAccepted } : {})}
+            {...(autoLaunch ? { autoLaunch } : {})}
             forceNewWorktree={forceNewWorktree}
-            offersWorkspaceModes={showGitControls}
+            offersWorkspaceModes={offersWorkspaceModes}
             autoEnvironmentLabel={autoEnvironmentLabel}
             onAutoEnvironment={onAutoEnvironment}
             envLocked={envLocked}
@@ -910,6 +965,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             addTargets={addTargets}
             onAddToMachine={onAddToMachine}
           />
+          {launchOptions ? <PluginLaunchOptionPickers control={launchOptions} /> : null}
         </div>
       ) : null}
       {showGitControls || showEnvironmentIndicator ? (
@@ -932,6 +988,7 @@ export const BranchToolbar = memo(function BranchToolbar({
                     }
                   : {})}
                 {...(onPluginLaunchAccepted ? { onLaunchAccepted: onPluginLaunchAccepted } : {})}
+                autoLaunch={autoLaunch ?? undefined}
                 autoEnvironmentLabel={autoEnvironmentLabel}
                 onAutoEnvironment={onAutoEnvironment}
                 envLocked={envLocked}
@@ -940,7 +997,8 @@ export const BranchToolbar = memo(function BranchToolbar({
                 {...(showEnvironmentPicker ? { onEnvironmentChange } : {})}
                 {...(addTargets.length > 0 ? { onAddToMachine: () => onAddToMachine(null) } : {})}
               />
-              {showGitControls ? (
+              {launchOptions ? <PluginLaunchOptionPickers control={launchOptions} /> : null}
+              {offersWorkspaceModes ? (
                 <Separator
                   orientation="vertical"
                   className="mx-0.5 h-3.5!"
@@ -949,7 +1007,7 @@ export const BranchToolbar = memo(function BranchToolbar({
               ) : null}
             </>
           )}
-          {showGitControls ? (
+          {offersWorkspaceModes ? (
             <BranchToolbarEnvModeSelector
               forceNewWorktree={forceNewWorktree}
               envLocked={envModeLocked}

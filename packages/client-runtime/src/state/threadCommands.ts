@@ -46,6 +46,7 @@ import {
   respondToThreadApproval,
   respondToThreadUserInput,
   dismissThreadUserInput,
+  recordThreadEnvironmentNotice,
   revertThreadCheckpoint,
   setThreadInteractionMode,
   setThreadRuntimeMode,
@@ -424,6 +425,12 @@ export function createThreadEnvironmentAtoms<R, E>(
     dismissUserInput: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:dismiss-user-input",
       execute: dismissThreadUserInput,
+      scheduler,
+      concurrency,
+    }),
+    recordEnvironmentNotice: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:record-environment-notice",
+      execute: recordThreadEnvironmentNotice,
       scheduler,
       concurrency,
     }),

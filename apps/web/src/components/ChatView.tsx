@@ -1,6 +1,6 @@
 import { m } from "../i18n/messages";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
-import { useGT, useMessages } from "gt-react";
+import { msg, useGT, useMessages } from "gt-react";
 import { ChildThreadApprovals } from "./chat/ChildThreadApprovals";
 import {
   draftRuntimeModeLimitsInstance,
@@ -65,7 +65,11 @@ import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { freshSessionBannerItem } from "./chat/ComposerFreshSession";
 import { heldComposerSendBannerItem } from "./chat/ComposerHeldSendBanner";
 import { armFreshSession, disarmFreshSession, useFreshSessionArmed } from "./chat/freshSessionArms";
-import { cancelHeldComposerSend, useComposerSendHeld } from "./chat/preparingComposerImages";
+import {
+  cancelHeldComposerSend,
+  countPreparingComposerImages,
+  useComposerSendHeld,
+} from "./chat/preparingComposerImages";
 import { useUsageLimitsPanel } from "./chat/useUsageLimitsPanel";
 import { useWorktreeSetup } from "./chat/useWorktreeSetup";
 import { useChatShortcuts } from "./chat/useChatShortcuts";
@@ -80,8 +84,9 @@ import {
   type ResponseContextRecord,
   type ChatFileAttachment,
   type EnvironmentId,
-  type MessageId,
+  MessageId,
   type ModelSelection,
+  type PluginInput,
   type PreviewAnnotationPayload,
   ProviderInstanceId,
   type ServerProvider,
@@ -223,7 +228,7 @@ import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import { shortcutLabelForCommand } from "../keybindings";
 import { cn } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
-import { toastManager } from "./ui/toast";
+import { stackedThreadToast, toastManager } from "./ui/toast";
 import { projectScriptIdFromCommand } from "~/projectScripts";
 import { newMessageId } from "~/lib/utils";
 import {
@@ -408,6 +413,22 @@ import { ChatTerminalDrawers } from "./chat/ChatTerminalDrawers";
 import { ChatRightPanel } from "./chat/ChatRightPanel";
 import type { RightPanelTabsHandle } from "./RightPanelTabs";
 import { useDraftEnvironmentRouting } from "./chat/useDraftEnvironmentRouting";
+import {
+  endPluginLaunch,
+  returnLaunchAttachments,
+  takeLaunchAttachments,
+  usePluginAutoLauncher,
+  usePluginAutoLaunchSend,
+  usePluginLaunch,
+} from "./chat/usePluginAutoLaunch";
+import { launcherDraftContent, type LauncherAttachment } from "./chat/pluginAutoLaunch.logic";
+import { PluginLaunchSteps } from "./plugins/PluginLaunchSteps";
+import { usePluginLaunchOptions } from "./chat/usePluginLaunchOptions";
+import { pluginLaunchContextWithOptions } from "@t3tools/client-runtime/plugins";
+import {
+  managedEnvironmentDidNotStart,
+  wakeManagedEnvironment,
+} from "../state/managedEnvironmentWake";
 import { branchMismatchBannerItem, extensionStatusBannerItem } from "./chat/ThreadActivityBanners";
 import { ThreadNow } from "./chat/ThreadNow";
 import { threadRuntimeIsActive, type ThreadStructure } from "@t3tools/client-runtime/state/shell";
@@ -737,6 +758,12 @@ export default function ChatView(props: ChatViewProps) {
     );
   // Draft ids survive promotion and expire on navigation, keeping the pending resend scoped correctly.
   const [workLocallyResendDraftId, setWorkLocallyResendDraftId] = useState<DraftId | null>(null);
+  // A message sent to a stopped sandbox goes out once the sandbox is back. Leaving the thread
+  // keeps the text in the composer and drops the pending send.
+  const [sendWhenStartedThreadKey, setSendWhenStartedThreadKey] = useState<string | null>(null);
+  if (sendWhenStartedThreadKey !== null && sendWhenStartedThreadKey !== routeThreadKey) {
+    setSendWhenStartedThreadKey(null);
+  }
   const [feedbackSubmissionsByThreadKey, setFeedbackSubmissionsByThreadKey] = useState<
     Record<string, ReadonlyArray<CodexFeedbackSubmission>>
   >({});
@@ -1404,6 +1431,12 @@ export default function ChatView(props: ChatViewProps) {
   // messages, so it would otherwise be offered a machine picker that does nothing.
   const canChangeEnvironment =
     hasMultipleEnvironments && !envLocked && draftId !== null && !draftThread?.promotedTo;
+  const pluginAutoLaunchEnvironmentId = activeThread?.environmentId ?? environmentId;
+  const pluginAutoLaunch = usePluginAutoLauncher({
+    environmentId: pluginAutoLaunchEnvironmentId,
+    threadId,
+    unsentDraft: isLocalDraftThread && !envLocked && !draftThread?.promotedTo,
+  });
 
   const loadBalancingSettings = useClientSettings((settings) => ({
     loadBalancingEnabled: settings.loadBalancingEnabled,
@@ -1697,7 +1730,25 @@ export default function ChatView(props: ChatViewProps) {
     ...timelineEntriesInput,
     visibleTurnItems: serverTimelineRows,
   });
-  const draftTimelineEntries = optimisticUserMessages.map(
+  // A first send a plugin took reads as sent: the launch's steps follow it in the footer.
+  const pluginLaunch = usePluginLaunch(threadId);
+  const pluginLaunchMessage: ChatMessage | null =
+    pluginLaunch === null
+      ? null
+      : {
+          id: MessageId.make(`plugin-launch:${pluginLaunch.context.requestId}`),
+          role: "user",
+          text: pluginLaunch.context.message,
+          runId: null,
+          createdAt: pluginLaunch.startedAt,
+          updatedAt: pluginLaunch.startedAt,
+          streaming: false,
+        };
+  const draftTimelineEntries = (
+    pluginLaunchMessage === null
+      ? optimisticUserMessages
+      : [...optimisticUserMessages, pluginLaunchMessage]
+  ).map(
     (message) =>
       ({
         id: message.id,
@@ -2395,6 +2446,18 @@ export default function ChatView(props: ChatViewProps) {
     canOverrideServerThreadEnvMode && pendingServerThreadBranchEntryForThread !== null
       ? pendingServerThreadBranchEntryForThread.branch
       : (activeThread?.branch ?? null);
+  const pluginLaunchOptions = usePluginLaunchOptions({
+    threadId,
+    environmentId: pluginAutoLaunchEnvironmentId,
+    launcher: pluginAutoLaunch?.active && pluginLaunch === null ? pluginAutoLaunch.launcher : null,
+    context: activeProject
+      ? {
+          projectDirectory: activeProject.workspaceRoot,
+          projectTitle: activeProject.title,
+          ...(activeThreadBranch ? { branch: activeThreadBranch } : {}),
+        }
+      : null,
+  });
   const startFromOrigin = isLocalDraftThread
     ? (draftThread?.startFromOrigin ?? false)
     : canOverrideServerThreadEnvMode
@@ -2980,7 +3043,9 @@ export default function ChatView(props: ChatViewProps) {
           (env) => env.environmentId === currentId,
         );
         const next = logicalProjectEnvironments[(index + 1) % logicalProjectEnvironments.length];
-        if (next) onEnvironmentChangeStable(next.environmentId);
+        if (!next) return;
+        pluginAutoLaunch?.setActive(false);
+        onEnvironmentChangeStable(next.environmentId);
       },
       "thread.steerQueuedMessage": ({ event }) =>
         routeKind !== "draft" && queuedRunsControlRef.current?.steerNext(event.repeat) === true,
@@ -3228,7 +3293,117 @@ export default function ChatView(props: ChatViewProps) {
     });
   };
   const onWorktreeSetupWorkLocallyStable = useStableCallback(onWorktreeSetupWorkLocally);
-  const onComposerSendStable = useStableCallback(onSend);
+  const pluginLaunchContext = () => {
+    const draft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+    return {
+      message: draft?.prompt ?? "",
+      hasAttachments:
+        (draft ? composerDraftHasUserContent({ ...draft, prompt: "" }) : false) ||
+        countPreparingComposerImages(composerDraftTargetKey) > 0,
+      modelSelection: JSON.stringify(
+        composerRef.current?.getSendContext().selectedModelSelection ??
+          composerSelectedModelSelection,
+      ),
+      runtimeMode,
+    };
+  };
+  const onPluginLaunchAccepted = (
+    input: PluginInput,
+    attachments: ReadonlyArray<LauncherAttachment> = [],
+  ) => {
+    const store = useComposerDraftStore.getState();
+    // First: the message went without the marks that name its attachments in the draft.
+    takeLaunchAttachments(composerDraftTarget, attachments);
+    if (store.getComposerDraft(composerDraftTarget)?.prompt === input.message)
+      store.setPrompt(composerDraftTarget, "");
+  };
+  const onPluginLaunchWithdrawn = () => {
+    if (pluginLaunch === null) return;
+    endPluginLaunch(threadId, pluginLaunch.context.requestId);
+    // Nothing started, so the message goes back above whatever was typed since.
+    const store = useComposerDraftStore.getState();
+    const typed = store.getComposerDraft(composerDraftTarget)?.prompt ?? "";
+    const { message } = pluginLaunch.context;
+    store.setPrompt(composerDraftTarget, typed.trim() === "" ? message : `${message}\n\n${typed}`);
+    returnLaunchAttachments(composerDraftTarget, pluginLaunch.attachments);
+  };
+  const onPluginLaunchWithdrawnStable = useStableCallback(onPluginLaunchWithdrawn);
+  const claimPluginAutoLaunch = usePluginAutoLaunchSend(sendInFlightRef);
+  const onSendLatest = useStableCallback(onSend);
+  const onComposerSend = (...args: Parameters<typeof onSend>) => {
+    if (
+      activeEnvironmentUnavailable &&
+      activeThread &&
+      routeKind === "server" &&
+      args[3] === undefined &&
+      args[4] === undefined
+    ) {
+      const { environmentId: stoppedEnvironmentId } = activeThread;
+      const wake = wakeManagedEnvironment(stoppedEnvironmentId);
+      if (wake !== null) {
+        args[0]?.preventDefault();
+        setSendWhenStartedThreadKey(routeThreadKey);
+        void wake.then((started) => {
+          if (started) return;
+          setSendWhenStartedThreadKey((key) => (key === routeThreadKey ? null : key));
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: m(msg("Not connected: message not sent")),
+              description: managedEnvironmentDidNotStart(stoppedEnvironmentId),
+            }),
+          );
+        });
+        return;
+      }
+    }
+    if (pluginLaunch !== null) {
+      // One draft starts one thread: its launch is still under way.
+      args[0]?.preventDefault();
+      toastManager.add(
+        stackedThreadToast({
+          type: "info",
+          title: m(msg("Still sending your previous message.")),
+          description: m(msg("Send again once it goes through or fails.")),
+        }),
+      );
+      return;
+    }
+    // A direct annotation or a detached dictation carries content the draft does not hold.
+    const launchContent = launcherDraftContent(
+      useComposerDraftStore.getState().getComposerDraft(composerDraftTarget),
+    );
+    const claim =
+      pluginAutoLaunch?.active && args[3] === undefined && args[4] === undefined && activeProject
+        ? claimPluginAutoLaunch({
+            threadId,
+            environmentId: pluginAutoLaunchEnvironmentId,
+            launcher: pluginAutoLaunch.launcher,
+            attachments: launchContent.attachments,
+            context: pluginLaunchContextWithOptions(
+              {
+                ...pluginLaunchContext(),
+                // Images and files go along; an image still being prepared cannot yet.
+                hasAttachments:
+                  launchContent.other || countPreparingComposerImages(composerDraftTargetKey) > 0,
+                projectDirectory: activeProject.workspaceRoot,
+                projectTitle: activeProject.title,
+                // Also the base of a new worktree, which this machine's checkout does not show.
+                ...(activeThreadBranch ? { branch: activeThreadBranch } : {}),
+              },
+              pluginLaunchOptions?.options ?? [],
+              pluginLaunchOptions?.picked ?? {},
+            ),
+            multipleModels: multipleModelSelections !== null,
+            isCurrent: () => currentRouteThreadKeyRef.current === routeThreadKey,
+            onClaimed: onPluginLaunchAccepted,
+          })
+        : null;
+    if (claim === null) return onSend(...args);
+    args[0]?.preventDefault();
+    return claim.then((claimed) => (claimed ? undefined : onSendLatest(...args)));
+  };
+  const onComposerSendStable = useStableCallback(onComposerSend);
   const sendPreviewAnnotation = (
     annotation: PreviewAnnotationPayload,
     image: ComposerImageAttachment | null,
@@ -3368,6 +3543,7 @@ export default function ChatView(props: ChatViewProps) {
   // its lifecycle status, guest messages awaiting you, then your queued messages.
   const timelineFooter =
     pendingHandoff === null &&
+    pluginLaunch === null &&
     !hasThreadNow &&
     threadStatusLine === null &&
     pendingGuestMessageCount === 0 &&
@@ -3380,6 +3556,15 @@ export default function ChatView(props: ChatViewProps) {
               endpoints={pendingHandoff}
               providers={providerStatuses}
               pending
+            />
+          </div>
+        )}
+        {pluginLaunch === null ? null : (
+          <div className="chat-content-lane pb-2">
+            <PluginLaunchSteps
+              key={pluginLaunch.context.requestId}
+              launch={pluginLaunch}
+              onWithdrawn={onPluginLaunchWithdrawnStable}
             />
           </div>
         )}
@@ -3401,6 +3586,26 @@ export default function ChatView(props: ChatViewProps) {
         {hasQueuedTurns ? queuedRunsControl : null}
       </>
     );
+
+  const sendAfterSandboxStarted = () => {
+    setSendWhenStartedThreadKey(null);
+    void onComposerSendStable();
+  };
+  const sendAfterSandboxStartedStable = useStableCallback(sendAfterSandboxStarted);
+  const sendWhenStartedReady =
+    sendWhenStartedThreadKey === routeThreadKey &&
+    isServerThread &&
+    !isSendBusy &&
+    !isRevertingCheckpoint &&
+    !threadDetailLoading &&
+    clientSettingsHydrated &&
+    !activeEnvironmentUnavailable &&
+    !activePendingUserInput &&
+    !feedbackUploading;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- sends the message that waited for its stopped sandbox once the thread is connected and loaded
+  useEffect(() => {
+    if (sendWhenStartedReady && !sendInFlightRef.current) sendAfterSandboxStartedStable();
+  }, [sendAfterSandboxStartedStable, sendInFlightRef, sendWhenStartedReady]);
 
   const pendingSidebarFileDrops = useSidebarPendingFileDropStore((state) => state.pending);
   const consumePendingFileDrop = useSidebarPendingFileDropStore(
@@ -4038,30 +4243,9 @@ export default function ChatView(props: ChatViewProps) {
                             {showComposerContextStrip && (
                               <div className="pointer-events-auto">
                                 <BranchToolbar
-                                  pluginLaunchContext={() => {
-                                    const draft = useComposerDraftStore
-                                      .getState()
-                                      .getComposerDraft(composerDraftTarget);
-                                    return {
-                                      message: draft?.prompt ?? "",
-                                      hasAttachments: draft
-                                        ? composerDraftHasUserContent({ ...draft, prompt: "" })
-                                        : false,
-                                      modelSelection: JSON.stringify(
-                                        composerRef.current?.getSendContext()
-                                          .selectedModelSelection ?? composerSelectedModelSelection,
-                                      ),
-                                      runtimeMode,
-                                    };
-                                  }}
-                                  onPluginLaunchAccepted={(input) => {
-                                    const store = useComposerDraftStore.getState();
-                                    if (
-                                      store.getComposerDraft(composerDraftTarget)?.prompt ===
-                                      input.message
-                                    )
-                                      store.setPrompt(composerDraftTarget, "");
-                                  }}
+                                  pluginLaunchContext={pluginLaunchContext}
+                                  onPluginLaunchAccepted={onPluginLaunchAccepted}
+                                  launchOptions={pluginLaunchOptions ?? undefined}
                                   forceNewWorktree={multipleModelSelections !== null}
                                   ref={branchToolbarRef}
                                   environmentId={activeThread.environmentId}
@@ -4198,6 +4382,7 @@ export default function ChatView(props: ChatViewProps) {
                   hasRepository={liveIsGitRepo === true}
                   envLocked={envLocked}
                   availableEnvironments={logicalProjectEnvironments}
+                  launchOptions={pluginLaunchOptions ?? undefined}
                   autoEnvironmentLabel={autoEnvironmentLabel}
                   onAutoEnvironment={
                     draftId &&
