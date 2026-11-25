@@ -9,6 +9,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, type PluginInput, ThreadId } from "@t3tools/contracts";
 import { useRouter } from "@tanstack/react-router";
 import { Atom } from "effect/reactivity";
@@ -19,6 +20,7 @@ import { randomUUID } from "~/lib/utils";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { environmentCatalog } from "../../connection/catalog";
 import { managedPluginEnvironmentsAtom, pluginCatalogsAtom } from "../../state/plugins";
+import { waitForThreadLoaded, waitForThreadShell } from "../../state/entities";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -210,6 +212,15 @@ export function usePluginAutoLaunchSend(sendInFlightRef: { current: boolean }) {
           },
           async (destination) => {
             // The thread shows up in the sidebar either way; it only opens for a user still waiting.
+            if (router.state.location.pathname !== draftPath) return;
+            // Open the thread once it can be shown: arriving before its messages have loaded
+            // flashes an empty page between the launch steps and the conversation.
+            const ref = scopeThreadRef(
+              EnvironmentId.make(destination.environmentId),
+              ThreadId.make(destination.threadId),
+            );
+            await waitForThreadShell(ref, 8_000);
+            await waitForThreadLoaded(ref, 4_000);
             if (router.state.location.pathname !== draftPath) return;
             await router.navigate({
               to: "/$environmentId/$threadId",
