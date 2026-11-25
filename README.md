@@ -27,6 +27,9 @@ T3 Code runs the coding agents on your machine and gives them one fast interface
 
 It works with Claude Code, Codex, Cursor, OpenCode, Grok Build, Antigravity, Kiro, Pi, Muse Code, fx, and any [ACP](./docs/user/providers-acp.md) agent. If an agent is set up on your computer, T3 Code can control it.
 
+> [!NOTE]
+> **This is an unofficial fork** ([DemonMartin/t3code](https://github.com/DemonMartin/t3code), branch `agentbox`). It adds sandboxes as the default place a chat runs, and controls over what an agent has in its context. **[FORK.md](FORK.md) describes what it changes and how to run it.** It is not affiliated with or endorsed by the T3 Code maintainers ([TRADEMARK.md](TRADEMARK.md)); the official downloads and apps linked here are the upstream product and do not contain these changes.
+
 ## What you get
 
 - **Your subscriptions.** T3 Code does not resell tokens. It drives the agents you are already signed in to.
