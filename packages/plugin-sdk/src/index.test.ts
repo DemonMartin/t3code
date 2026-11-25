@@ -1,6 +1,6 @@
 import { expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
-import { PluginView } from "./index.ts";
+import { PluginView, PluginViewDescriptor } from "./index.ts";
 
 const valid = Schema.is(PluginView);
 it("rejects ambiguous form and table identities before clients render them", () => {
@@ -117,4 +117,20 @@ it("bounds ordered graphs and rejects backwards edges and duplicate nodes", () =
       ],
     }),
   ).toBe(false);
+});
+
+it("carries an optional auto-launch command id on a view descriptor", () => {
+  const decode = Schema.decodeUnknownSync(PluginViewDescriptor);
+  const launcher = {
+    id: "launcher",
+    title: "New sandbox",
+    location: "environment-launcher",
+    permission: "environment:maintain",
+  };
+  expect(decode({ ...launcher, autoLaunch: "launch" })).toEqual({
+    ...launcher,
+    autoLaunch: "launch",
+  });
+  expect(decode(launcher)).toEqual(launcher);
+  expect(() => decode({ ...launcher, autoLaunch: "Not An Id" })).toThrow();
 });

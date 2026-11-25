@@ -306,6 +306,7 @@ it.effect("filters and authorizes views and rejects malformed view output", () =
               id: location,
               title: "Machines",
               location,
+              ...(location === "environment-launcher" ? { autoLaunch: "launch" } : {}),
               permission: "environment:maintain" as const,
               read: (input?: Record<string, Schema.Json>) =>
                 Effect.succeed({
@@ -364,6 +365,11 @@ it.effect("filters and authorizes views and rejects malformed view output", () =
       expect(
         (yield* host.list(["orchestration:read"])).plugins[0]?.views.map((view) => view.id),
       ).toEqual(["thread-details", "usage"]);
+      expect(
+        (yield* host.list(AuthStandardClientScopes)).plugins[0]?.views.find(
+          (view) => view.id === "environment-launcher",
+        )?.autoLaunch,
+      ).toBe("launch");
       expect((yield* host.readView(input, ["orchestration:read"]).pipe(Effect.flip))._tag).toBe(
         "EnvironmentAuthorizationError",
       );

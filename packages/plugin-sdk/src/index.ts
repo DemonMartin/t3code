@@ -272,6 +272,8 @@ export const PluginViewDescriptor = Schema.Struct({
   ]),
   presentation: Schema.optionalKey(Schema.Literals(["popover", "dialog"])),
   requiresRepository: Schema.optionalKey(Schema.Boolean),
+  /** Command the client runs on the first send of a new draft; an `environment-launch` result claims the send. */
+  autoLaunch: Schema.optionalKey(PluginLocalId),
   permission: PluginPermission,
 });
 export type PluginViewDescriptor = typeof PluginViewDescriptor.Type;
