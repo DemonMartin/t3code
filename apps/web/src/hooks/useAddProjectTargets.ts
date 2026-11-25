@@ -2,8 +2,11 @@ import { canCreateProjectInEnvironment } from "@t3tools/client-runtime/operation
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { AuthSourceControlWriteScope, resolveEnvironmentMachineKind } from "@t3tools/contracts";
 
+import { useAtomValue } from "@effect/atom-react";
+
 import type { EnvironmentOption } from "../components/BranchToolbar.logic";
 import { useEnvironments } from "../state/environments";
+import { managedPluginEnvironmentIdsAtom } from "../state/plugins";
 import { useEnvironmentsWithScope } from "../state/session";
 
 export type AddProjectTarget = Pick<EnvironmentOption, "environmentId" | "label" | "machine">;
@@ -11,7 +14,8 @@ export type AddProjectTarget = Pick<EnvironmentOption, "environmentId" | "label"
 /**
  * Connected machines that do not have the project yet and can clone it.
  * `projectEnvironments` is the project's current machine list, from
- * `useLogicalProjectEnvironments`. Projects without a git remote get none.
+ * `useLogicalProjectEnvironments`. Projects without a git remote get none, and
+ * a plugin-managed environment is never offered.
  */
 export function useAddProjectTargets(
   project: EnvironmentProject | null,
@@ -19,6 +23,7 @@ export function useAddProjectTargets(
 ): readonly AddProjectTarget[] {
   const { environments } = useEnvironments();
   const canClone = useEnvironmentsWithScope(environments, AuthSourceControlWriteScope);
+  const managedEnvironmentIds = useAtomValue(managedPluginEnvironmentIdsAtom);
   if (!project?.repositoryIdentity?.locator.remoteUrl) return [];
   const hasProject = new Set([
     project.environmentId,
@@ -28,6 +33,7 @@ export function useAddProjectTargets(
     .filter(
       (environment) =>
         !hasProject.has(environment.environmentId) &&
+        !managedEnvironmentIds.has(environment.environmentId) &&
         canClone.has(environment.environmentId) &&
         canCreateProjectInEnvironment(environment.connection.phase) &&
         environment.serverConfig !== null,

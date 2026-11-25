@@ -36,6 +36,22 @@ export interface EnvironmentOption {
   machine: EnvironmentMachineKind;
 }
 
+/**
+ * A plugin-managed environment runs the one thread it was created for, so it is never a place
+ * to start or balance new work. The thread that lives on one still lists it, to name its machine.
+ */
+export function withoutManagedEnvironments<T extends { readonly environmentId: string }>(
+  environments: ReadonlyArray<T>,
+  managedEnvironmentIds: ReadonlySet<string>,
+  activeEnvironmentId: string,
+): T[] {
+  return environments.filter(
+    (environment) =>
+      environment.environmentId === activeEnvironmentId ||
+      !managedEnvironmentIds.has(environment.environmentId),
+  );
+}
+
 /** "Add to another machine" stays muted until hovered: easy to find, quieter than the machines. */
 export const ADD_TO_MACHINE_LABEL_CLASS =
   "flex min-w-0 items-center gap-1.5 opacity-55 in-data-highlighted:opacity-100 in-data-popup-open:opacity-100";

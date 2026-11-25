@@ -196,6 +196,36 @@ export function resolveGroupDefaultProject<TProject extends EnvironmentProject>(
   );
 }
 
+/**
+ * A plugin-managed environment runs the one thread it was created for. New work started from
+ * it belongs to the same project on the environment that owns it.
+ */
+export function resolveManagedEnvironmentOwnerProject<TProject extends EnvironmentProject>(
+  project: TProject,
+  projects: ReadonlyArray<TProject>,
+  managedEnvironments: ReadonlyArray<{
+    readonly environmentId: string;
+    readonly owner: { readonly environmentId: string };
+  }>,
+  settings: ProjectGroupingSettings,
+): TProject {
+  const ownerEnvironmentId = managedEnvironments.find(
+    (resource) => resource.environmentId === project.environmentId,
+  )?.owner.environmentId;
+  if (ownerEnvironmentId === undefined) return project;
+  const groupKey = deriveLogicalProjectKeyFromSettings(project, settings);
+  return (
+    selectGroupDefaultProject(
+      projects.filter(
+        (candidate) =>
+          candidate.environmentId === ownerEnvironmentId &&
+          isPickableProjectMember(candidate) &&
+          deriveLogicalProjectKeyFromSettings(candidate, settings) === groupKey,
+      ),
+    ) ?? project
+  );
+}
+
 export function resolveScratchProjectScopeKey(
   key: string | null,
   projects: ReadonlyArray<

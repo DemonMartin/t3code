@@ -26,6 +26,7 @@ import {
   deriveLogicalProjectKeyFromSettings,
   getProjectOrderKey,
   resolveGroupDefaultProject,
+  resolveManagedEnvironmentOwnerProject,
   selectProjectGroupingSettings,
   type ProjectGroupingSettings,
 } from "@t3tools/client-runtime/state/project-grouping";
@@ -47,6 +48,7 @@ import {
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { peekT3ProjectFile, readT3ProjectFile } from "../lib/t3ProjectFileDefaults";
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import { managedPluginEnvironmentsAtom } from "../state/plugins";
 import { environmentSummaries } from "../state/presentation";
 import { environmentServerConfigsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
@@ -121,6 +123,31 @@ function pickExplicitWorkspaceOptions(options: NewThreadWorkspaceOptions | undef
   };
 }
 
+/** A draft opened from a plugin-managed environment starts on the environment that owns it. */
+function resolveNewDraftProjectRef(
+  projectRef: ScopedProjectRef,
+  input: {
+    readonly projects: ReadonlyArray<EnvironmentProject>;
+    readonly managedEnvironments: Parameters<typeof resolveManagedEnvironmentOwnerProject>[2];
+    readonly settings: ProjectGroupingSettings;
+    readonly keepEnvironment: boolean;
+  },
+): ScopedProjectRef {
+  if (input.keepEnvironment) return projectRef;
+  const project = input.projects.find(
+    (candidate) =>
+      candidate.id === projectRef.projectId && candidate.environmentId === projectRef.environmentId,
+  );
+  if (!project) return projectRef;
+  const owner = resolveManagedEnvironmentOwnerProject(
+    project,
+    input.projects,
+    input.managedEnvironments,
+    input.settings,
+  );
+  return owner === project ? projectRef : scopeProjectRef(owner.environmentId, owner.id);
+}
+
 export function useNewThreadHandler() {
   return createNewThreadHandler(useRouter());
 }
@@ -134,7 +161,7 @@ export function createNewThreadHandler(router: AnyRouter) {
   };
 
   return (
-    projectRef: ScopedProjectRef,
+    requestedProjectRef: ScopedProjectRef,
     options?: {
       branch?: string | null;
       worktreePath?: string | null;
@@ -147,6 +174,13 @@ export function createNewThreadHandler(router: AnyRouter) {
   ): Promise<{ draftId: DraftId; threadId: ThreadId } | null> => {
     const projects = readProjects();
     const projectGroupingSettings = selectProjectGroupingSettings(getClientSettings());
+    const projectRef = resolveNewDraftProjectRef(requestedProjectRef, {
+      projects,
+      managedEnvironments: appAtomRegistry.get(managedPluginEnvironmentsAtom),
+      settings: projectGroupingSettings,
+      // An existing worktree is a path on the machine that holds it.
+      keepEnvironment: typeof options?.worktreePath === "string",
+    });
     // Read at call time; status pushes replace the config map and would recreate every sidebar handler.
     const environmentServerConfigs = appAtomRegistry.get(environmentServerConfigsAtom);
     const targetServerSettings =
