@@ -23,11 +23,14 @@ import { create } from "zustand";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { pluginCatalogsAtom } from "../../state/plugins";
 import { serverEnvironment } from "../../state/server";
+import { threadEnvironment } from "../../state/threads";
 
 type Entry = PluginCatalog["plugins"][number];
 
 export interface PluginActionRun {
   readonly environmentId: EnvironmentId;
+  /** Where the thread itself lives, which is not always where the plugin runs. */
+  readonly threadEnvironmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly plugin: Entry;
   readonly action: PluginStatusAction;
@@ -104,6 +107,14 @@ export function startPluginAction(destination: EnvironmentId | null) {
       input: pluginStatusActionInput(run.action, run.threadId, destination, run.choice),
     },
     execute: (step) => execute(running, step),
+    // Recorded on the thread's own environment, so it survives a reload and shows everywhere.
+    onThreadNotice: (text) =>
+      void runAtomCommand(
+        appAtomRegistry,
+        threadEnvironment.recordEnvironmentNotice,
+        { environmentId: run.threadEnvironmentId, input: { threadId: run.threadId, text } },
+        { label: "plugin-thread-notice", reportFailure: false },
+      ),
     signal: controller.signal,
     onStatus: (status) => {
       const now = current();
@@ -121,6 +132,7 @@ export function startPluginAction(destination: EnvironmentId | null) {
 /** Called when a status action is pressed. One action runs at a time. */
 export function openPluginAction(request: {
   readonly environmentId: EnvironmentId;
+  readonly threadEnvironmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly plugin: Entry;
   readonly action: PluginStatusAction;

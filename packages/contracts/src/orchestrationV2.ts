@@ -2037,6 +2037,8 @@ export const OrchestrationV2TurnItem = Schema.Union([
     message: Schema.String,
     level: Schema.optional(OrchestrationV2SystemNoticeLevel),
     mcpSignIn: Schema.optional(OrchestrationV2McpSignIn),
+    /** Set on a note that a setting of the thread's environment changed; shown like a model change. */
+    about: Schema.optional(Schema.Literal("environment")),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2934,6 +2936,8 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     message: Schema.String,
     level: Schema.optional(OrchestrationV2SystemNoticeLevel),
     mcpSignIn: Schema.optional(OrchestrationV2McpSignIn),
+    /** Set on a note that a setting of the thread's environment changed; shown like a model change. */
+    about: Schema.optional(Schema.Literal("environment")),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
@@ -3746,6 +3750,13 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     requestId: RuntimeRequestId,
+  }),
+  // Notes in a thread that a setting of its environment changed, such as its size. Starts nothing.
+  Schema.Struct({
+    type: Schema.Literal("thread.environment-notice.record"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    text: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
   }),
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback"),

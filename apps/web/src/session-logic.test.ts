@@ -124,6 +124,46 @@ describe("V2 session presentation", () => {
     expect(deriveCanInterruptRunningThread(true, null)).toBe(false);
   });
 
+  it("shows a changed environment setting as a line between turns, not as agent work", () => {
+    const now = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
+    const notice = {
+      id: TurnItemId.make("item-environment-notice"),
+      threadId: ThreadId.make("thread-environment-notice"),
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 0,
+      status: "completed" as const,
+      title: null,
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      type: "system_notice" as const,
+      message: "Sandbox size changed to Medium",
+      level: "info" as const,
+    } satisfies Extract<OrchestrationV2TurnItem, { readonly type: "system_notice" }>;
+    const kinds = (item: typeof notice & { about?: "environment" }) =>
+      deriveTimelineEntriesFromVisibleTurnItems({
+        visibleTurnItems: [
+          {
+            item,
+            position: 0,
+            visibility: "local",
+            sourceThreadId: item.threadId,
+            sourceItemId: item.id,
+          },
+        ],
+        optimisticMessages: [],
+      }).map((entry) => entry.kind);
+
+    expect(kinds({ ...notice, about: "environment" })).toEqual(["event"]);
+    // Any other notice stays in the work log.
+    expect(kinds(notice)).toEqual(["work"]);
+  });
+
   it("labels provider retry progress, delay, recovery, and exhaustion", () => {
     const now = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
     const retryItem = {

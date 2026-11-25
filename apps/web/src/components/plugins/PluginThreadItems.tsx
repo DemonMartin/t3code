@@ -188,6 +188,7 @@ function PluginThreadView({
         onPress={(action, choice) =>
           openPluginAction({
             environmentId,
+            threadEnvironmentId: targetEnvironmentId,
             threadId,
             plugin,
             action,

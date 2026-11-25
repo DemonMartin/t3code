@@ -224,6 +224,19 @@ describe("thread details actions", () => {
     expect(
       await runPluginAction({ start, execute: async () => ({ ok: true, value: { any: 1 } }) }),
     ).toBeNull();
+    // An action that ends by noting what it changed hands the text over and opens no dialog.
+    const noted: Array<string> = [];
+    expect(
+      await runPluginAction({
+        start,
+        execute: async () => ({
+          ok: true,
+          value: { $t3: "thread-notice", text: "Idle stop set to 1 h" },
+        }),
+        onThreadNotice: (text) => noted.push(text),
+      }),
+    ).toBeNull();
+    expect(noted).toEqual(["Idle stop set to 1 h"]);
   });
   it("carries relayed steps between environments until the plugin ends or the user cancels", async () => {
     const start = { environmentId: "source", commandId: "move", input: {} };

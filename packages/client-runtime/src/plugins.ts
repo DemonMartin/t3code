@@ -13,6 +13,7 @@ import type {
 import {
   PluginEnvironmentLaunchResult,
   PluginLaunchOptionsResult,
+  PluginThreadNoticeResult,
   PluginNoticeResult,
   PluginRelayResult,
   PluginSecretResult,
@@ -378,6 +379,7 @@ const failed = (message: string | null, resolve: MFunctionType): PluginNoticeRes
   text: message ?? resolve(msg("The plugin command failed. Try again.")),
 });
 
+const decodeThreadNoticeResult = Schema.decodeUnknownOption(PluginThreadNoticeResult);
 const decodeRelayResult = Schema.decodeUnknownOption(PluginRelayResult);
 /** Enough for a large carried transfer; a plugin that never finishes still stops. */
 const MAX_PLUGIN_RELAY_STEPS = 5_000;
@@ -391,6 +393,8 @@ export async function runPluginAction(options: {
   readonly start: PluginActionStep;
   readonly execute: (step: PluginActionStep) => Promise<PluginActionReply>;
   readonly onStatus?: (status: string) => void;
+  /** The action ended by noting what it changed; the caller records that in the thread. */
+  readonly onThreadNotice?: (text: string) => void;
   readonly signal?: AbortSignal;
 }): Promise<PluginNoticeResult | null> {
   let step = options.start;
@@ -399,7 +403,11 @@ export async function runPluginAction(options: {
     const reply = await options.execute(step);
     if (!reply.ok) return failed(reply.message, options.resolve ?? mFallback);
     const relay = Option.getOrNull(decodeRelayResult(reply.value));
-    if (relay === null) return Option.getOrNull(decodeNoticeResult(reply.value));
+    if (relay === null) {
+      const threadNotice = Option.getOrNull(decodeThreadNoticeResult(reply.value));
+      if (threadNotice !== null) options.onThreadNotice?.(threadNotice.text);
+      return Option.getOrNull(decodeNoticeResult(reply.value));
+    }
     if (relay.status !== undefined) options.onStatus?.(relay.status);
     step = {
       environmentId: relay.environmentId ?? step.environmentId,

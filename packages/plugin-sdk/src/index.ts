@@ -369,6 +369,16 @@ export const PluginNoticeResult = Schema.Struct({
 export type PluginNoticeResult = typeof PluginNoticeResult.Type;
 
 /**
+ * Ends a `thread-details` action by noting in its thread what it changed, such as the size of
+ * the environment the thread runs in. The client records it in the thread's timeline.
+ */
+export const PluginThreadNoticeResult = Schema.Struct({
+  $t3: Schema.Literal("thread-notice"),
+  text: Label,
+});
+export type PluginThreadNoticeResult = typeof PluginThreadNoticeResult.Type;
+
+/**
  * Continues a `thread-details` action with another command of the same plugin, here or on
  * another connected environment. The client carries each step, so two environments that
  * cannot reach each other can still exchange data, one bounded command at a time.
