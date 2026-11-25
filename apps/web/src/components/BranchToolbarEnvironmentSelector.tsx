@@ -218,8 +218,10 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
             ))}
             {launchers.map((launcher) => (
               <SelectItem key={launcher.value} value={launcher.value}>
-                <BoxIcon aria-hidden="true" className="size-3" />
-                {launcher.title}
+                <span className="inline-flex items-center gap-1.5">
+                  <BoxIcon aria-hidden="true" className="size-3" />
+                  {launcher.title}
+                </span>
               </SelectItem>
             ))}
             {onAddToMachine ? (
