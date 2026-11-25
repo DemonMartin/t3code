@@ -16,6 +16,7 @@ import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import type { PluginAutoLaunch } from "../chat/usePluginAutoLaunch";
 import {
+  OutputTail,
   SetupStepActions,
   SetupStepDetail,
   SetupStepNote,
@@ -114,6 +115,9 @@ export function PluginLaunchSteps({
           />
           {step.detail !== null && step.status === "failed" ? (
             <SetupStepNote>{step.detail}</SetupStepNote>
+          ) : null}
+          {progress.output.length > 0 && (step.status === "running" || step.status === "failed") ? (
+            <OutputTail lines={progress.output} failed={step.status === "failed"} rows={8} />
           ) : null}
         </Fragment>
       ))}

@@ -433,6 +433,7 @@ it("reads a launch's steps and controls from its launcher view", () => {
       { id: "agent", label: "agent", detail: null, status: "pending" },
     ],
     actions: [cancel],
+    output: [],
   });
   expect(view([step("start", "danger", "image not found")]).steps[0]?.status).toBe("failed");
 
@@ -454,5 +455,18 @@ it("reads a launch's steps and controls from its launcher view", () => {
   ).toBe(true);
   expect(view([]).withdrawn).toBe(true);
   // A view still loading says nothing either way.
-  expect(pluginLaunchProgress(null)).toEqual({ withdrawn: false, steps: [], actions: [] });
+  expect(pluginLaunchProgress(null)).toEqual({
+    withdrawn: false,
+    steps: [],
+    actions: [],
+    output: [],
+  });
+
+  // Code blocks are what the running step printed.
+  expect(
+    view([
+      step("prepare", "warning"),
+      { id: "log", kind: "code", text: "installing\nbuilding packages\n" },
+    ]).output,
+  ).toEqual(["installing", "building packages"]);
 });

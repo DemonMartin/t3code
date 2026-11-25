@@ -176,18 +176,21 @@ const LAUNCH_STEP_STATUS = {
 } as const;
 
 /**
- * What a launcher view says about a launch in flight. Each status block is a step, its tone the
- * step's state, and the actions are the launch's controls. A launcher that predates steps shows
- * text only, which becomes one step. A view with neither, or with a form, is asking how to
- * launch: this launch no longer exists.
+ * A launch in flight, read from its launcher view: status blocks are the steps, actions the
+ * controls, code blocks the running step's output. Text alone (an older launcher) is one step.
+ * A view with none of these, or with a form, is asking how to launch: the launch is gone.
  */
 export function pluginLaunchProgress(view: PluginView | null): {
   readonly withdrawn: boolean;
   readonly steps: ReadonlyArray<PluginLaunchStep>;
   readonly actions: ReadonlyArray<PluginAction>;
+  readonly output: ReadonlyArray<string>;
 } {
-  if (view === null) return { withdrawn: false, steps: [], actions: [] };
+  if (view === null) return { withdrawn: false, steps: [], actions: [], output: [] };
   const actions = view.blocks.flatMap((block) => (block.kind === "actions" ? block.actions : []));
+  const output = view.blocks.flatMap((block) =>
+    block.kind === "code" ? block.text.replace(/\n+$/u, "").split("\n") : [],
+  );
   const steps = view.blocks.flatMap((block): PluginLaunchStep[] =>
     block.kind === "status" && block.label !== undefined
       ? [
@@ -200,10 +203,10 @@ export function pluginLaunchProgress(view: PluginView | null): {
         ]
       : [],
   );
-  if (steps.length > 0) return { withdrawn: false, steps, actions };
+  if (steps.length > 0) return { withdrawn: false, steps, actions, output };
   const text = view.blocks.flatMap((block) => (block.kind === "text" ? [block.text] : []));
   if (text.length === 0 || view.blocks.some((block) => block.kind === "form"))
-    return { withdrawn: true, steps: [], actions: [] };
+    return { withdrawn: true, steps: [], actions: [], output: [] };
   return {
     withdrawn: false,
     steps: [
@@ -215,6 +218,7 @@ export function pluginLaunchProgress(view: PluginView | null): {
       },
     ],
     actions,
+    output,
   };
 }
 

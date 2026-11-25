@@ -267,12 +267,20 @@ function StageRow({
 }
 
 const OUTPUT_TAIL_LINES = 4;
-const OUTPUT_TAIL_SLOTS = Array.from({ length: OUTPUT_TAIL_LINES }, (_, slot) => slot);
 
-function OutputTail({ lines, failed }: { lines: ReadonlyArray<string>; failed: boolean }) {
-  const rows = OUTPUT_TAIL_SLOTS.map((slot) => ({
+/** The last lines a running step printed, in a box whose height does not jump as they arrive. */
+export function OutputTail({
+  lines,
+  failed,
+  rows: rowCount = OUTPUT_TAIL_LINES,
+}: {
+  lines: ReadonlyArray<string>;
+  failed: boolean;
+  rows?: number;
+}) {
+  const rows = Array.from({ length: rowCount }, (_, slot) => ({
     slot,
-    line: lines[lines.length - OUTPUT_TAIL_LINES + slot] ?? "",
+    line: lines[lines.length - rowCount + slot] ?? "",
   }));
   return (
     <pre
