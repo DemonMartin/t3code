@@ -134,3 +134,21 @@ it("carries an optional auto-launch command id on a view descriptor", () => {
   expect(decode(launcher)).toEqual(launcher);
   expect(() => decode({ ...launcher, autoLaunch: "Not An Id" })).toThrow();
 });
+
+it("lets a stopped managed environment name the action that starts it again", () => {
+  const environment = {
+    id: "sandbox",
+    kind: "environment",
+    environmentId: "sbx-1",
+    label: "Sandbox",
+    url: "https://sandbox.test",
+    state: "stopped",
+    connect: { id: "pair", label: "Connect", command: "pair", input: {} },
+  };
+  const resume = { id: "resume", label: "Resume", command: "state", input: { state: "running" } };
+  expect(valid({ title: "Environments", blocks: [environment] })).toBe(true);
+  expect(valid({ title: "Environments", blocks: [{ ...environment, resume }] })).toBe(true);
+  expect(valid({ title: "Environments", blocks: [{ ...environment, resume: "state" }] })).toBe(
+    false,
+  );
+});

@@ -11,7 +11,13 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { WifiOffIcon } from "lucide-react";
+import { BoxIcon, WifiOffIcon } from "lucide-react";
+import {
+  managedEnvironmentResumeLabelAtom,
+  managedEnvironmentStatusAtom,
+  wakeManagedEnvironment,
+} from "../../state/managedEnvironmentWake";
+import { Spinner } from "../ui/spinner";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { environmentCatalog } from "../../connection/catalog";
 import { ConnectionDiagnosisHeadline } from "../settings/ConnectionDiagnosisDetails";
@@ -76,6 +82,12 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
   });
+  // A sandbox its plugin stopped is not a broken connection: it starts again when it is used.
+  const unavailableEnvironmentId = activeEnvironmentUnavailableState?.environmentId ?? "";
+  const managedStatus = useAtomValue(managedEnvironmentStatusAtom(unavailableEnvironmentId));
+  const managedResumeLabel = useAtomValue(
+    managedEnvironmentResumeLabelAtom(unavailableEnvironmentId),
+  );
   const activeEnvironmentConnectionPhase = activeEnvironment?.connection.phase ?? "available";
   const activeReconnectingEnvironmentId =
     activeEnvironmentConnectionPhase === "connecting" ||
@@ -195,7 +207,32 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
       activeEnvironmentUnavailableState !== null &&
       unavailableConnection !== null &&
       !suppressUnavailableBanner;
-    if (showUnavailableBanner) {
+    if (activeEnvironmentUnavailableState !== null && managedStatus !== null) {
+      const { environmentId, label } = activeEnvironmentUnavailableState;
+      items.push({
+        id: `environment-stopped:${environmentId}`,
+        variant: "default",
+        group: "environment",
+        icon: managedStatus === "starting" ? <Spinner size="xs" aria-hidden="true" /> : <BoxIcon />,
+        title:
+          managedStatus === "starting"
+            ? gt("Starting {provider}", { provider: label })
+            : gt("{environment} is offline", { environment: label }),
+        ...(managedStatus === "stopped" && managedResumeLabel !== null
+          ? {
+              actions: (
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  onClick={() => void wakeManagedEnvironment(environmentId)}
+                >
+                  {managedResumeLabel}
+                </Button>
+              ),
+            }
+          : {}),
+      });
+    } else if (showUnavailableBanner) {
       items.push({
         id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
         variant: unavailableConnection.phase === "error" ? "error" : "warning",

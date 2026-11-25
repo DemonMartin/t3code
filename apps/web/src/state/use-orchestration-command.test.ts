@@ -10,12 +10,19 @@ import { assert, beforeEach, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
   allowed: new Set<string>(),
+  stopped: new Map<string, "starting" | "stopped">(),
   readScope: vi.fn(),
   run: vi.fn(),
 }));
 
 vi.mock("react", () => ({ useCallback: (callback: unknown) => callback }));
 vi.mock("./session", () => ({ readEnvironmentScope: state.readScope }));
+vi.mock("../rpc/atomRegistry", () => ({
+  appAtomRegistry: { get: (environmentId: string) => state.stopped.get(environmentId) ?? null },
+}));
+vi.mock("./managedEnvironmentWake", () => ({
+  managedEnvironmentStatusAtom: (environmentId: string) => environmentId,
+}));
 vi.mock("./use-atom-command", () => ({ useAtomCommand: () => state.run }));
 
 import { useOrchestrationCommand } from "./use-orchestration-command";
@@ -31,6 +38,7 @@ const target = (environmentId: EnvironmentId): Target => ({
 
 beforeEach(() => {
   state.allowed.clear();
+  state.stopped.clear();
   state.run.mockReset().mockResolvedValue(AsyncResult.success("receipt"));
   state.readScope
     .mockReset()
@@ -70,4 +78,12 @@ it("does not dispatch a later mutation after access changes while awaiting a rec
   expect((await pending)._tag).toBe("Success");
   expect((await mutate(target(second)))._tag).toBe("Failure");
   expect(state.run).toHaveBeenCalledTimes(1);
+});
+
+it("leaves a stopped sandbox's access to the command, which starts it before checking", async () => {
+  // No session, so no scope to read: the command layer starts the sandbox, then authorizes.
+  state.stopped.set(second, "stopped");
+  const mutate = useOrchestrationCommand(command, { reportFailure: false });
+  expect(await mutate(target(second))).toMatchObject({ _tag: "Success", value: "receipt" });
+  expect(state.run).toHaveBeenCalledWith(target(second));
 });

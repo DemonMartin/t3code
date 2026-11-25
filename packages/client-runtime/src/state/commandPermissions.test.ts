@@ -34,7 +34,8 @@ import * as Layer from "effect/Layer";
 import { Atom, AtomRegistry, AsyncResult } from "effect/reactivity";
 import { EnvironmentRegistry } from "../connection/registry.ts";
 import { createCommandPermissions } from "./commandPermissions.ts";
-import { createEnvironmentRpcCommand, runAtomCommand } from "./runtime.ts";
+import { createEnvironmentRpcCommand, environmentWakeAtom, runAtomCommand } from "./runtime.ts";
+import { EnvironmentRpcUnavailableError } from "../rpc/client.ts";
 import { AVAILABLE_CONNECTION_STATE, BearerConnectionTarget } from "../connection/model.ts";
 import { createPeerLinkEnvironmentAtoms } from "./peerLinks.ts";
 
@@ -358,6 +359,45 @@ describe("command permissions", () => {
       registry.dispose();
     }
   });
+});
+
+it("asks the installed wake before a command reaches its environment", async () => {
+  const registry = AtomRegistry.make();
+  const unmount = registry.mount(sessions(env));
+  registry.set(sessions(env), AsyncResult.success(grant(true)));
+  let calls = 0;
+  const command = createEnvironmentRpcCommand(runtime, {
+    label: "test.delete",
+    tag: WS_METHODS.scheduledTasksDelete,
+    execute: () => Effect.sync(() => ({ id: ScheduledTaskId.make(`task-${++calls}`) })),
+  });
+  const target = { environmentId: env, input: { id: ScheduledTaskId.make("task") } };
+  const quiet = { reportFailure: false, reportDefect: false };
+  const asked: EnvironmentId[] = [];
+  try {
+    // Nothing to start: the command runs as it would for any machine.
+    registry.set(environmentWakeAtom, {
+      wake: (environmentId) => Effect.sync(() => asked.push(environmentId)).pipe(Effect.as(false)),
+    });
+    expect((await runAtomCommand(registry, command, target, quiet))._tag).toBe("Success");
+    expect(asked).toEqual([env]);
+
+    // A stopped environment that does not come back fails the command by name, unsent.
+    registry.set(environmentWakeAtom, {
+      wake: (environmentId) =>
+        Effect.fail(
+          new EnvironmentRpcUnavailableError({ environmentId, message: "Sandbox did not start." }),
+        ),
+    });
+    const failed = await runAtomCommand(registry, command, target, quiet);
+    expect(failed._tag === "Failure" ? Cause.squash(failed.cause) : null).toMatchObject({
+      message: "Sandbox did not start.",
+    });
+    expect(calls).toBe(1);
+  } finally {
+    unmount();
+    registry.dispose();
+  }
 });
 
 it.effect(

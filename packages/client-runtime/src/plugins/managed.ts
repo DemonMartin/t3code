@@ -10,6 +10,20 @@ import type { ConnectionCatalogEntry, PluginConnectionOwner } from "../connectio
 export interface ManagedPluginEnvironment extends PluginManagedEnvironment {
   readonly owner: PluginConnectionOwner;
   readonly command: PluginCommandInput;
+  /** Set when the plugin offers `resume` and registered its command. */
+  readonly resumeCommand?: PluginCommandInput;
+}
+
+/**
+ * What reaching a managed environment takes first: its plugin's resume command while it is
+ * stopped, or waiting while it starts. Only something the user does asks this; listing, syncing
+ * and drafts never start an environment.
+ */
+export function managedEnvironmentWakeStep(
+  resource: Pick<ManagedPluginEnvironment, "state" | "resumeCommand"> | undefined,
+): "resume" | "wait" | null {
+  if (resource?.state === "stopped") return resource.resumeCommand ? "resume" : null;
+  return resource?.state === "starting" ? "wait" : null;
 }
 
 export function createManagedPluginConnections(ports: {

@@ -6,6 +6,7 @@ import { BearerConnectionTarget } from "../connection/model.ts";
 import {
   createManagedPluginConnections,
   managedEnvironmentOwners,
+  managedEnvironmentWakeStep,
   type ManagedPluginEnvironment,
 } from "./managed.ts";
 const controller = EnvironmentId.make("controller");
@@ -154,4 +155,17 @@ it("knows who owns a managed environment from its saved connection, before any p
     [guest, controller],
     [pending, controller],
   ]);
+});
+it("starts a managed environment only while it is stopped and its plugin can resume it", () => {
+  const resumeCommand = source().command;
+  expect(managedEnvironmentWakeStep(source({ state: "stopped", resumeCommand }))).toBe("resume");
+  // Without a resume command the plugin gave no way back: the connection fails as before.
+  expect(managedEnvironmentWakeStep(source({ state: "stopped" }))).toBeNull();
+  // Someone already started it; a command only has to wait.
+  expect(managedEnvironmentWakeStep(source({ state: "starting", resumeCommand }))).toBe("wait");
+  for (const state of ["running", "stopping", "deleting", "deleted", "error"] as const) {
+    expect(managedEnvironmentWakeStep(source({ state, resumeCommand }))).toBeNull();
+  }
+  // Not a managed environment, or its plugin has not answered yet.
+  expect(managedEnvironmentWakeStep(undefined)).toBeNull();
 });

@@ -411,6 +411,10 @@ import {
   usePluginLaunch,
 } from "./chat/usePluginAutoLaunch";
 import { PluginLaunchSteps } from "./plugins/PluginLaunchSteps";
+import {
+  managedEnvironmentDidNotStart,
+  wakeManagedEnvironment,
+} from "../state/managedEnvironmentWake";
 import { branchMismatchBannerItem, extensionStatusBannerItem } from "./chat/ThreadActivityBanners";
 import { ThreadNow } from "./chat/ThreadNow";
 import { threadRuntimeIsActive, type ThreadStructure } from "@t3tools/client-runtime/state/shell";
@@ -740,6 +744,12 @@ export default function ChatView(props: ChatViewProps) {
     );
   // Draft ids survive promotion and expire on navigation, keeping the pending resend scoped correctly.
   const [workLocallyResendDraftId, setWorkLocallyResendDraftId] = useState<DraftId | null>(null);
+  // A message sent to a stopped sandbox goes out once the sandbox is back. Leaving the thread
+  // keeps the text in the composer and drops the pending send.
+  const [sendWhenStartedThreadKey, setSendWhenStartedThreadKey] = useState<string | null>(null);
+  if (sendWhenStartedThreadKey !== null && sendWhenStartedThreadKey !== routeThreadKey) {
+    setSendWhenStartedThreadKey(null);
+  }
   const [feedbackSubmissionsByThreadKey, setFeedbackSubmissionsByThreadKey] = useState<
     Record<string, ReadonlyArray<CodexFeedbackSubmission>>
   >({});
@@ -3283,6 +3293,32 @@ export default function ChatView(props: ChatViewProps) {
   const claimPluginAutoLaunch = usePluginAutoLaunchSend(sendInFlightRef);
   const onSendLatest = useStableCallback(onSend);
   const onComposerSend = (...args: Parameters<typeof onSend>) => {
+    if (
+      activeEnvironmentUnavailable &&
+      activeThread &&
+      routeKind === "server" &&
+      args[3] === undefined &&
+      args[4] === undefined
+    ) {
+      const { environmentId: stoppedEnvironmentId } = activeThread;
+      const wake = wakeManagedEnvironment(stoppedEnvironmentId);
+      if (wake !== null) {
+        args[0]?.preventDefault();
+        setSendWhenStartedThreadKey(routeThreadKey);
+        void wake.then((started) => {
+          if (started) return;
+          setSendWhenStartedThreadKey((key) => (key === routeThreadKey ? null : key));
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: m(msg("Not connected: message not sent")),
+              description: managedEnvironmentDidNotStart(stoppedEnvironmentId),
+            }),
+          );
+        });
+        return;
+      }
+    }
     if (pluginLaunch !== null) {
       // One draft starts one thread: its launch is still under way.
       args[0]?.preventDefault();
@@ -3501,6 +3537,26 @@ export default function ChatView(props: ChatViewProps) {
         {hasQueuedTurns ? queuedRunsControl : null}
       </>
     );
+
+  const sendAfterSandboxStarted = () => {
+    setSendWhenStartedThreadKey(null);
+    void onComposerSendStable();
+  };
+  const sendAfterSandboxStartedStable = useStableCallback(sendAfterSandboxStarted);
+  const sendWhenStartedReady =
+    sendWhenStartedThreadKey === routeThreadKey &&
+    isServerThread &&
+    !isSendBusy &&
+    !isRevertingCheckpoint &&
+    !threadDetailLoading &&
+    clientSettingsHydrated &&
+    !activeEnvironmentUnavailable &&
+    !activePendingUserInput &&
+    !feedbackUploading;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- sends the message that waited for its stopped sandbox once the thread is connected and loaded
+  useEffect(() => {
+    if (sendWhenStartedReady && !sendInFlightRef.current) sendAfterSandboxStartedStable();
+  }, [sendAfterSandboxStartedStable, sendInFlightRef, sendWhenStartedReady]);
 
   const pendingSidebarFileDrops = useSidebarPendingFileDropStore((state) => state.pending);
   const consumePendingFileDrop = useSidebarPendingFileDropStore(

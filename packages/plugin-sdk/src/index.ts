@@ -90,6 +90,8 @@ export const PluginManagedEnvironment = Schema.Struct({
     "error",
   ]),
   connect: PluginAction,
+  /** Starts a `stopped` environment again; a client runs it when the user acts on its thread. */
+  resume: Schema.optionalKey(PluginAction),
   threadId: Schema.optionalKey(Label),
   launchRequestId: Schema.optionalKey(Label),
 });
