@@ -27,6 +27,62 @@ T3 Code runs the coding agents on your machine and gives them one fast interface
 
 It works with Claude Code, Codex, Cursor, OpenCode, Grok Build, Antigravity, Kiro, Pi, Muse Code, fx, and any [ACP](./docs/user/providers-acp.md) agent. If an agent is set up on your computer, T3 Code can control it.
 
+> [!NOTE]
+> **This is an unofficial fork** ([DemonMartin/t3code](https://github.com/DemonMartin/t3code), branch `agentbox`). It builds on the plugin-host branch [`t3/create-plugin-system`](https://github.com/djgilcrease/t3code/tree/t3/create-plugin-system) of djgilcrease/t3code, which tracks [pingdotgg/t3code](https://github.com/pingdotgg/t3code). It is not affiliated with or endorsed by the T3 Code maintainers ([TRADEMARK.md](TRADEMARK.md)). The official downloads and apps linked below are the upstream product and do not contain these changes.
+
+## About this fork
+
+The fork lets a plugin make its own environment the default place a chat runs: open a project, write a message, send, and the chat starts in a fresh sandbox, as cloud coding agents do. The changes are generic plugin-host features; the plugin that uses them is [DemonMartin/t3-sandboxes](https://github.com/DemonMartin/t3-sandboxes) (branch `agentbox`).
+
+### What changed
+
+**For plugins**
+
+- A launcher view (`location: "environment-launcher"`) may name an `autoLaunch` command. The client runs it on the first send of a new draft; an `environment-launch` result claims the send, any other result leaves it to the normal send, a failure is shown without sending.
+- A launcher may name an `autoLaunchOptions` command that returns options for a new launch (for example a size). The composer shows them next to "Run on" and sends the picked values with the launch.
+- While a launch runs, the launcher view's `status` blocks are shown as the setup steps of the thread being started, and its `code` blocks as the running step's output. This replaces the launch dialog for auto launches.
+- A managed environment may carry a `resume` action. The client runs it when the user turns to a thread on a stopped environment (opening it, sending a message, or a thread command such as Settle), waits for it, then carries out what the user asked.
+- A status action may offer a `choice` instead of a button, and launch options use the same control: a picker with a search field, a description beside each entry and an optional form to create a new entry.
+- A status action's command may answer with a `thread-notice`; it is recorded in the thread it was run from and shown in the conversation like a model change.
+
+**In the web client**
+
+- A draft whose project has an auto launcher shows the launcher as its "Run on" target; picking a machine opts that draft out. Workspace-mode controls that do not apply are hidden.
+- New drafts open on the project of the environment that owns a plugin-managed environment, never on the managed environment itself, including after a reload.
+- Plugin-managed environments are not offered as "Run on", Auto balance, "Add to another machine" or provider-update targets. The update dialog names the installed and available version of each provider and no longer closes while its rows change.
+- A stopped managed environment shows a quiet starting status instead of a connection error.
+- The started thread opens once its messages are loaded, without an empty page in between.
+
+**In the server**
+
+- With `T3CODE_CODEX_EXTERNAL_SANDBOX=1`, Codex's read-only and workspace-write modes use its external-sandbox policy. Inside a container Codex's own sandbox cannot start; the container is the sandbox.
+- Launcher views may return `status` blocks.
+
+Mobile and desktop clients are unchanged; the features above are in the web client the server hosts.
+
+### Install and run
+
+There are no packaged builds of this fork. Run the server from source and use its web client; everything else in the official guide ([docs/user/install.md](docs/user/install.md)) applies as written.
+
+```sh
+git clone https://github.com/DemonMartin/t3code.git && cd t3code   # branch agentbox is the default
+# Vite+ (vp) and Node 24 are required, as upstream: see docs/operations/00_development.md
+vp i
+vp run --filter t3 build
+node apps/server/dist/bin.mjs serve --host 127.0.0.1 --port 3773 --no-browser
+```
+
+Differences from the official guide:
+
+- **No desktop app, mobile app or `npx t3` for this fork.** The official apps can still connect to a server running this fork as a remote environment, but they show upstream behaviour (no automatic launch, no launch steps).
+- **Plugins.** Register plugins by path in `plugins.json` under the T3 home (`T3CODE_HOME`, default `~/.t3`), as described in [docs/user/plugins.md](docs/user/plugins.md). For the Sandboxes plugin, follow the README of [DemonMartin/t3-sandboxes](https://github.com/DemonMartin/t3-sandboxes).
+- **Sandbox images** must contain this same build with `t3` on `PATH`; rebuild the image whenever you rebuild the server. Inside a container set `T3CODE_CODEX_EXTERNAL_SANDBOX=1`.
+- **Updating.** `git pull`, then `vp i && vp run --filter t3 build`, rebuild your sandbox image and restart the server. `vp i` also rebuilds `packages/plugin-sdk`, whose compiled output the server consumes; a stale copy silently drops newer plugin fields.
+
+The branch is rebased on the plugin-host branch from time to time, so expect force-pushes.
+
+---
+
 ## What you get
 
 - **Your subscriptions.** T3 Code does not resell tokens. It drives the agents you are already signed in to.
