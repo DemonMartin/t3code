@@ -56,6 +56,31 @@ export const PluginAction = Schema.Struct({
 export type PluginAction = typeof PluginAction.Type;
 export const PluginTone = Schema.Literals(["success", "warning", "danger", "muted"]);
 export type PluginTone = typeof PluginTone.Type;
+export const PluginField = Schema.Struct({
+  name: PluginLocalId,
+  label: Label,
+  kind: Schema.Literals(["text", "password", "number", "boolean", "select", "multiline", "image"]),
+  value: Schema.optionalKey(Schema.Union([Schema.String, Schema.Number, Schema.Boolean])),
+  options: Schema.optionalKey(
+    Schema.Array(Schema.Struct({ label: Label, value: Label })).check(Schema.isMaxLength(100)),
+  ),
+  required: Schema.optionalKey(Schema.Boolean),
+});
+/** One entry of a list the user picks from; `description` is shown muted beside the label. */
+export const PluginChoiceOption = Schema.Struct({
+  label: Label,
+  value: Label,
+  description: Schema.optionalKey(Label),
+});
+export type PluginChoiceOption = typeof PluginChoiceOption.Type;
+/** Lets the user add an entry to a list: a small form whose values are sent to `command`. */
+export const PluginChoiceCreate = Schema.Struct({
+  label: Label,
+  command: PluginLocalId,
+  fields: Schema.Array(PluginField).check(Schema.isMaxLength(6)),
+  input: PluginInput,
+});
+export type PluginChoiceCreate = typeof PluginChoiceCreate.Type;
 export const PluginStatusAction = Schema.Struct({
   ...PluginAction.fields,
   /** Shown in a confirmation before the command runs. */
@@ -68,23 +93,12 @@ export const PluginStatusAction = Schema.Struct({
       name: PluginLocalId,
       /** The current value; must be one of the options. */
       value: Label,
-      options: Schema.Array(Schema.Struct({ label: Label, value: Label })).check(
-        Schema.isMaxLength(20),
-      ),
+      options: Schema.Array(PluginChoiceOption).check(Schema.isMaxLength(20)),
+      create: Schema.optionalKey(PluginChoiceCreate),
     }),
   ),
 });
 export type PluginStatusAction = typeof PluginStatusAction.Type;
-export const PluginField = Schema.Struct({
-  name: PluginLocalId,
-  label: Label,
-  kind: Schema.Literals(["text", "password", "number", "boolean", "select", "multiline", "image"]),
-  value: Schema.optionalKey(Schema.Union([Schema.String, Schema.Number, Schema.Boolean])),
-  options: Schema.optionalKey(
-    Schema.Array(Schema.Struct({ label: Label, value: Label })).check(Schema.isMaxLength(100)),
-  ),
-  required: Schema.optionalKey(Schema.Boolean),
-});
 export const PluginManagedEnvironment = Schema.Struct({
   id: PluginLocalId,
   kind: Schema.Literal("environment"),
@@ -252,7 +266,8 @@ export const PluginView = Schema.Struct({
               ({ choice }) =>
                 choice === undefined ||
                 (unique(choice.options.map((option) => option.value)) &&
-                  choice.options.some((option) => option.value === choice.value)),
+                  choice.options.some((option) => option.value === choice.value) &&
+                  unique(choice.create?.fields.map((field) => field.name) ?? [])),
             )
           );
         if (block.kind === "table")
@@ -296,6 +311,8 @@ export const PluginViewDescriptor = Schema.Struct({
   requiresRepository: Schema.optionalKey(Schema.Boolean),
   /** Command the client runs on the first send of a new draft; an `environment-launch` result claims the send. */
   autoLaunch: Schema.optionalKey(PluginLocalId),
+  /** Command that answers `launch-options`: settings the user may pick before that first send. */
+  autoLaunchOptions: Schema.optionalKey(PluginLocalId),
   permission: PluginPermission,
 });
 export type PluginViewDescriptor = typeof PluginViewDescriptor.Type;
@@ -322,6 +339,25 @@ export const PluginEnvironmentLaunchResult = Schema.Struct({
   requestId: Label,
 });
 export type PluginEnvironmentLaunchResult = typeof PluginEnvironmentLaunchResult.Type;
+
+/**
+ * Answers a launcher's `autoLaunchOptions` command. Each option is one list the client shows
+ * beside the launcher; the picked value reaches the `autoLaunch` command under `name`.
+ */
+export const PluginLaunchOptionsResult = Schema.Struct({
+  $t3: Schema.Literal("launch-options"),
+  options: Schema.Array(
+    Schema.Struct({
+      name: PluginLocalId,
+      label: Label,
+      /** The choice a new launch starts with unless the user picks another. */
+      value: Label,
+      choices: Schema.Array(PluginChoiceOption).check(Schema.isMaxLength(20)),
+      create: Schema.optionalKey(PluginChoiceCreate),
+    }),
+  ).check(Schema.isMaxLength(4)),
+});
+export type PluginLaunchOptionsResult = typeof PluginLaunchOptionsResult.Type;
 
 /** Ends a `thread-details` action with a message, and optionally a thread to open. */
 export const PluginNoticeResult = Schema.Struct({

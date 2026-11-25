@@ -411,6 +411,8 @@ import {
   usePluginLaunch,
 } from "./chat/usePluginAutoLaunch";
 import { PluginLaunchSteps } from "./plugins/PluginLaunchSteps";
+import { usePluginLaunchOptions } from "./chat/usePluginLaunchOptions";
+import { pluginLaunchContextWithOptions } from "@t3tools/client-runtime/plugins";
 import {
   managedEnvironmentDidNotStart,
   wakeManagedEnvironment,
@@ -2431,6 +2433,18 @@ export default function ChatView(props: ChatViewProps) {
     canOverrideServerThreadEnvMode && pendingServerThreadBranchEntryForThread !== null
       ? pendingServerThreadBranchEntryForThread.branch
       : (activeThread?.branch ?? null);
+  const pluginLaunchOptions = usePluginLaunchOptions({
+    threadId,
+    environmentId: pluginAutoLaunchEnvironmentId,
+    launcher: pluginAutoLaunch?.active && pluginLaunch === null ? pluginAutoLaunch.launcher : null,
+    context: activeProject
+      ? {
+          projectDirectory: activeProject.workspaceRoot,
+          projectTitle: activeProject.title,
+          ...(activeThreadBranch ? { branch: activeThreadBranch } : {}),
+        }
+      : null,
+  });
   const startFromOrigin = isLocalDraftThread
     ? (draftThread?.startFromOrigin ?? false)
     : canOverrideServerThreadEnvMode
@@ -3338,13 +3352,17 @@ export default function ChatView(props: ChatViewProps) {
             threadId,
             environmentId: pluginAutoLaunchEnvironmentId,
             launcher: pluginAutoLaunch.launcher,
-            context: {
-              ...pluginLaunchContext(),
-              projectDirectory: activeProject.workspaceRoot,
-              projectTitle: activeProject.title,
-              // Also the base of a new worktree, which this machine's checkout does not show.
-              ...(activeThreadBranch ? { branch: activeThreadBranch } : {}),
-            },
+            context: pluginLaunchContextWithOptions(
+              {
+                ...pluginLaunchContext(),
+                projectDirectory: activeProject.workspaceRoot,
+                projectTitle: activeProject.title,
+                // Also the base of a new worktree, which this machine's checkout does not show.
+                ...(activeThreadBranch ? { branch: activeThreadBranch } : {}),
+              },
+              pluginLaunchOptions?.options ?? [],
+              pluginLaunchOptions?.picked ?? {},
+            ),
             multipleModels: multipleModelSelections !== null,
             isCurrent: () => currentRouteThreadKeyRef.current === routeThreadKey,
             onClaimed: onPluginLaunchAccepted,
@@ -4190,6 +4208,7 @@ export default function ChatView(props: ChatViewProps) {
                                 <BranchToolbar
                                   pluginLaunchContext={pluginLaunchContext}
                                   onPluginLaunchAccepted={onPluginLaunchAccepted}
+                                  launchOptions={pluginLaunchOptions ?? undefined}
                                   forceNewWorktree={multipleModelSelections !== null}
                                   ref={branchToolbarRef}
                                   environmentId={activeThread.environmentId}
@@ -4322,6 +4341,7 @@ export default function ChatView(props: ChatViewProps) {
                   hasRepository={liveIsGitRepo === true}
                   envLocked={envLocked}
                   availableEnvironments={logicalProjectEnvironments}
+                  launchOptions={pluginLaunchOptions ?? undefined}
                   autoEnvironmentLabel={autoEnvironmentLabel}
                   onAutoEnvironment={
                     draftId &&

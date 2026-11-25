@@ -3,6 +3,8 @@ import type { MFunctionType } from "gt-i18n/types";
 import type {
   PluginAction,
   PluginBlock,
+  PluginChoiceCreate,
+  PluginChoiceOption,
   PluginInput,
   PluginCatalog,
   PluginStatusAction,
@@ -10,6 +12,7 @@ import type {
 } from "@t3tools/contracts";
 import {
   PluginEnvironmentLaunchResult,
+  PluginLaunchOptionsResult,
   PluginNoticeResult,
   PluginRelayResult,
   PluginSecretResult,
@@ -104,12 +107,18 @@ export function pluginEnvironmentLaunchers(catalog: PluginCatalog | null | undef
           .filter((view) => view.location === "environment-launcher")
           .map((view) => {
             const command = plugin.commands.find((command) => command.id === view.autoLaunch);
+            const options = plugin.commands.find(
+              (command) => command.id === view.autoLaunchOptions,
+            );
             return {
               pluginId: plugin.id,
               viewId: view.id,
               title: view.title,
               autoLaunch: command
                 ? { commandId: command.id, permission: command.permission }
+                : null,
+              autoLaunchOptions: options
+                ? { commandId: options.id, permission: options.permission }
                 : null,
             };
           })
@@ -130,6 +139,74 @@ export function pluginAutoLauncher(
       (launcher): launcher is PluginAutoLauncher => launcher.autoLaunch !== null,
     ) ?? null
   );
+}
+
+/** The entries of a list whose label or description contains what the user typed. */
+export function pluginChoiceMatches<Choice extends PluginChoiceOption>(
+  choices: ReadonlyArray<Choice>,
+  query: string,
+): ReadonlyArray<Choice> {
+  const needle = query.trim().toLowerCase();
+  return needle === ""
+    ? choices
+    : choices.filter((choice) =>
+        `${choice.label} ${choice.description ?? ""}`.toLowerCase().includes(needle),
+      );
+}
+
+/** The entry a list gained since `before`: what the user just created, to select it for them. */
+export function pluginCreatedChoice<Choice extends PluginChoiceOption>(
+  before: ReadonlyArray<string>,
+  choices: ReadonlyArray<Choice>,
+): Choice | null {
+  return choices.find((choice) => !before.includes(choice.value)) ?? null;
+}
+
+/** A list's create form in the shape plugin forms use, so both read their fields the same way. */
+export function pluginChoiceCreateForm(create: PluginChoiceCreate): PluginForm {
+  return {
+    id: "create",
+    kind: "form",
+    label: create.label,
+    command: create.command,
+    fields: create.fields,
+    input: create.input,
+  };
+}
+
+const decodeLaunchOptionsResult = Schema.decodeUnknownOption(PluginLaunchOptionsResult);
+export type PluginLaunchOption = PluginLaunchOptionsResult["options"][number];
+
+/** The options a launcher offers for a new launch; none for any other answer. */
+export function pluginLaunchOptions(value: unknown): ReadonlyArray<PluginLaunchOption> {
+  return Option.getOrNull(decodeLaunchOptionsResult(value))?.options ?? [];
+}
+
+/** What each option is set to: the user's pick while it is still offered, else its default. */
+export function pluginLaunchOptionValues(
+  options: ReadonlyArray<PluginLaunchOption>,
+  picked: Readonly<Record<string, string>>,
+): Record<string, string> {
+  return Object.fromEntries(
+    options.map((option) => {
+      const pick = picked[option.name];
+      return [
+        option.name,
+        option.choices.some((choice) => choice.value === pick) && pick !== undefined
+          ? pick
+          : option.value,
+      ];
+    }),
+  );
+}
+
+/** The launch context wins over an option of the same name, so no option can replace the message. */
+export function pluginLaunchContextWithOptions<Context extends PluginInput>(
+  context: Context,
+  options: ReadonlyArray<PluginLaunchOption>,
+  picked: Readonly<Record<string, string>>,
+): Context & PluginInput {
+  return { ...pluginLaunchOptionValues(options, picked), ...context };
 }
 
 /** The thread a launch started, once its environment runs and this client is connected to it. */

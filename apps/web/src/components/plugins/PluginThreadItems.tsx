@@ -7,10 +7,13 @@ import {
   pluginThreadPanels,
   type PluginStatus,
 } from "@t3tools/client-runtime/plugins";
+import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
   EnvironmentId,
   ThreadId,
   type PluginCatalog,
+  type PluginChoiceCreate,
+  type PluginInput,
   type PluginStatusAction,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
@@ -23,7 +26,7 @@ import { cn } from "../../lib/utils";
 import { useEnvironmentMachines, useEnvironments } from "../../state/environments";
 import { pluginCatalogsAtom } from "../../state/plugins";
 import { serverEnvironment } from "../../state/server";
-import { ThreadDetailsControl, ThreadDetailsSelectControl } from "../chat/ThreadDetailsControl";
+import { ThreadDetailsControl } from "../chat/ThreadDetailsControl";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { Button } from "../ui/button";
 import {
@@ -47,6 +50,8 @@ import { PLUGIN_TONE_DOT_CLASS } from "./PluginStatusDots";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
+import { appAtomRegistry } from "../../rpc/atomRegistry";
+import { PluginChoicePicker } from "./PluginChoicePicker";
 import { PluginPanels } from "./PluginPanels";
 import { Popover, PopoverTrigger, PopoverPopup } from "../ui/popover";
 
@@ -149,6 +154,29 @@ function PluginThreadView({
   );
   const view = Option.getOrNull(AsyncResult.value(result));
   const busy = usePluginActionRun((state) => state.run?.phase === "running");
+  const gt = useGT();
+  // Adds an entry to a status action's list; the plugin's refreshed view then offers it.
+  const createChoice = async (create: PluginChoiceCreate, input: PluginInput) => {
+    const command = plugin.commands.find((candidate) => candidate.id === create.command);
+    if (!command) return gt("The plugin command failed. Try again.");
+    const outcome = await runAtomCommand(
+      appAtomRegistry,
+      serverEnvironment.executePluginCommand,
+      {
+        environmentId,
+        input: {
+          pluginId: plugin.id,
+          commandId: command.id,
+          permission: command.permission,
+          input: { ...input, threadId },
+        },
+      },
+      { label: "plugin-choice-create", reportFailure: false },
+    );
+    if (outcome._tag === "Success") return null;
+    const failure = squashAtomCommandFailure(outcome);
+    return failure instanceof Error ? failure.message : gt("The plugin command failed. Try again.");
+  };
   return view?.blocks.map((block) =>
     block.kind === "status" && (block.environmentId ?? environmentId) === targetEnvironmentId ? (
       <PluginStatusItem
@@ -166,6 +194,7 @@ function PluginThreadView({
             ...(choice === undefined ? {} : { choice }),
           })
         }
+        onCreate={createChoice}
       />
     ) : null,
   );
@@ -177,12 +206,14 @@ function PluginStatusItem({
   plugin,
   busy,
   onPress,
+  onCreate,
 }: {
   block: PluginStatus;
   environmentId: EnvironmentId;
   plugin: Entry;
   busy: boolean;
   onPress: (action: PluginStatusAction, choice?: string) => void;
+  onCreate: (create: PluginChoiceCreate, input: PluginInput) => Promise<string | null>;
 }) {
   const label =
     block.label === undefined ? null : (
@@ -214,6 +245,7 @@ function PluginStatusItem({
           plugin={plugin}
           busy={busy}
           onPress={onPress}
+          onCreate={onCreate}
         />
       ))}
     </>
@@ -226,12 +258,14 @@ function PluginStatusActionButton({
   plugin,
   busy,
   onPress,
+  onCreate,
 }: {
   action: PluginStatusAction;
   environmentId: EnvironmentId;
   plugin: Entry;
   busy: boolean;
   onPress: (action: PluginStatusAction, choice?: string) => void;
+  onCreate: (create: PluginChoiceCreate, input: PluginInput) => Promise<string | null>;
 }) {
   const command = plugin.commands.find((candidate) => candidate.id === action.command);
   const catalogs = useAtomValue(pluginCatalogsAtom);
@@ -252,29 +286,21 @@ function PluginStatusActionButton({
   const disabled = !command || !allowed || busy;
   const { choice } = action;
   if (choice !== undefined) {
-    const current = choice.options.find((option) => option.value === choice.value);
+    const { create } = choice;
     return (
-      <Select
+      <PluginChoicePicker
+        label={action.label}
         value={choice.value}
+        choices={choice.options}
         disabled={disabled}
-        items={choice.options}
         // The list shows the plugin's value: a pick runs the command, whose result refreshes it.
-        onValueChange={(value) => {
-          if (value !== null && value !== choice.value) onPress(action, value);
-        }}
+        onPick={(value) => onPress(action, value)}
+        create={create ? { form: create, save: (input) => onCreate(create, input) } : undefined}
+        trigger={<ThreadDetailsControl size="xs" variant="ghost" part="meta" />}
       >
-        <ThreadDetailsSelectControl size="xs" variant="ghost" part="meta" aria-label={action.label}>
-          {`${action.label}: ${current?.label ?? choice.value}`}
-          <ChevronDownIcon aria-hidden className="size-3 opacity-70" />
-        </ThreadDetailsSelectControl>
-        <SelectPopup alignItemWithTrigger={false}>
-          {choice.options.map((option) => (
-            <SelectItem key={option.value} value={option.value}>
-              {option.label}
-            </SelectItem>
-          ))}
-        </SelectPopup>
-      </Select>
+        {choice.options.find((option) => option.value === choice.value)?.label ?? choice.value}
+        <ChevronDownIcon aria-hidden className="size-3 opacity-70" />
+      </PluginChoicePicker>
     );
   }
   return (

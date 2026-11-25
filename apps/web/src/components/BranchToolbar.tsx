@@ -17,6 +17,8 @@ import { useAtomValue } from "@effect/atom-react";
 import { pluginCatalogsAtom } from "../state/plugins";
 import { pluginEnvironmentLaunchers } from "@t3tools/client-runtime/plugins";
 import { type PluginAutoLaunchControl, usePluginAutoLauncher } from "./chat/usePluginAutoLaunch";
+import type { PluginLaunchOptionsControl } from "./chat/usePluginLaunchOptions";
+import { PluginLaunchOptionPickers } from "./plugins/PluginLaunchOptionPickers";
 import type { PluginInput, EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import {
   BoxIcon,
@@ -101,6 +103,8 @@ export interface BranchToolbarHandle {
 }
 
 interface BranchToolbarProps {
+  /** The settings the draft's launcher offers, shown beside Run on while it is the target. */
+  launchOptions?: PluginLaunchOptionsControl | undefined;
   pluginLaunchContext?: () => PluginInput;
   onPluginLaunchAccepted?: (input: PluginInput) => void;
   layout?: "composer" | "panel";
@@ -738,6 +742,7 @@ function useLabelsOverflow(): readonly [
 
 export const BranchToolbar = memo(function BranchToolbar({
   layout = "composer",
+  launchOptions,
   pluginLaunchContext,
   onPluginLaunchAccepted,
   panelSection = "all",
@@ -897,6 +902,9 @@ export const BranchToolbar = memo(function BranchToolbar({
             onAddToMachine={onAddToMachine}
           />
         ) : null}
+        {panelSection !== "branch" && launchOptions ? (
+          <PluginLaunchOptionPickers control={launchOptions} displayMode="panel" />
+        ) : null}
         {panelSection !== "workspace" ? (
           <BranchToolbarBranchSelector
             displayMode="panel"
@@ -957,6 +965,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             addTargets={addTargets}
             onAddToMachine={onAddToMachine}
           />
+          {launchOptions ? <PluginLaunchOptionPickers control={launchOptions} /> : null}
         </div>
       ) : null}
       {showGitControls || showEnvironmentIndicator ? (
@@ -988,6 +997,7 @@ export const BranchToolbar = memo(function BranchToolbar({
                 {...(showEnvironmentPicker ? { onEnvironmentChange } : {})}
                 {...(addTargets.length > 0 ? { onAddToMachine: () => onAddToMachine(null) } : {})}
               />
+              {launchOptions ? <PluginLaunchOptionPickers control={launchOptions} /> : null}
               {offersWorkspaceModes ? (
                 <Separator
                   orientation="vertical"

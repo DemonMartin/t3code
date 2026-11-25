@@ -1,5 +1,4 @@
 import { mergeProps } from "@base-ui/react/merge-props";
-import { Select as SelectPrimitive } from "@base-ui/react/select";
 import { useRender } from "@base-ui/react/use-render";
 import { T, Var } from "gt-react";
 import type { ComponentProps } from "react";
@@ -108,26 +107,6 @@ export function ThreadDetailsControl({
     );
   }
   return control;
-}
-
-/** A select's trigger with the look of the panel's other controls. */
-export function ThreadDetailsSelectControl({
-  part = "row",
-  size = "default",
-  variant = "default",
-  tone = "default",
-  children,
-  ...props
-}: Omit<SelectPrimitive.Trigger.Props, "className" | "render"> &
-  Pick<ComponentProps<typeof ThreadDetailsControl>, "part" | "size" | "variant" | "tone">) {
-  return (
-    <SelectPrimitive.Trigger
-      render={<ThreadDetailsControl part={part} size={size} variant={variant} tone={tone} />}
-      {...props}
-    >
-      {children}
-    </SelectPrimitive.Trigger>
-  );
 }
 
 export function ThreadDetailsMoreButton({

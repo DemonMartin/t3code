@@ -13,8 +13,14 @@ import {
   pluginGraphLayout,
   pluginThreadPanels,
   pluginAutoLauncher,
+  pluginChoiceCreateForm,
+  pluginChoiceMatches,
+  pluginCreatedChoice,
   pluginEnvironmentLaunchers,
+  pluginLaunchContextWithOptions,
   pluginLaunchDestination,
+  pluginLaunchOptions,
+  pluginLaunchOptionValues,
   pluginLaunchProgress,
   type PluginForm,
 } from "./plugins.ts";
@@ -352,7 +358,7 @@ it("starts new drafts through the launcher whose auto-launch command its plugin 
     views: [
       { ...view, id: "manual" },
       { ...view, id: "missing", autoLaunch: "withdrawn" },
-      { ...view, id: "launcher", autoLaunch: "launch" },
+      { ...view, id: "launcher", autoLaunch: "launch", autoLaunchOptions: "launch" },
       { ...view, id: "settings", location: "settings" as const, autoLaunch: "launch" },
     ],
   };
@@ -370,7 +376,10 @@ it("starts new drafts through the launcher whose auto-launch command its plugin 
     viewId: "launcher",
     title: "New sandbox",
     autoLaunch: auto,
+    // The options command counts only when the plugin registered it, like the launch itself.
+    autoLaunchOptions: auto,
   });
+  expect(pluginEnvironmentLaunchers(catalog)[1]?.autoLaunchOptions).toBeNull();
   expect(
     pluginAutoLauncher({ ...catalog, plugins: [{ ...plugin, status: "stopped" }] }),
   ).toBeNull();
@@ -378,6 +387,75 @@ it("starts new drafts through the launcher whose auto-launch command its plugin 
     pluginAutoLauncher({ ...catalog, plugins: [{ ...plugin, views: plugin.views.slice(0, 2) }] }),
   ).toBeNull();
   expect(pluginAutoLauncher(null)).toBeNull();
+});
+
+it("starts a launch with the options the user picked, and the plugin's defaults otherwise", () => {
+  const size = {
+    name: "size",
+    label: "Size",
+    value: "low",
+    choices: [
+      { label: "Low", value: "low" },
+      { label: "High", value: "high" },
+    ],
+  };
+  const options = pluginLaunchOptions({
+    $t3: "launch-options",
+    options: [size, { ...size, name: "message", value: "replaced" }],
+  });
+  expect(options.map((option) => option.name)).toEqual(["size", "message"]);
+  // Anything else a command answers offers nothing.
+  expect(pluginLaunchOptions(null)).toEqual([]);
+  expect(
+    pluginLaunchOptions({ $t3: "launch-options", options: [{ ...size, name: "No" }] }),
+  ).toEqual([]);
+
+  const context = { message: "Fix the test", projectDirectory: "/work/app" };
+  expect(pluginLaunchContextWithOptions(context, options, { size: "high" })).toEqual({
+    size: "high",
+    message: "Fix the test",
+    projectDirectory: "/work/app",
+  });
+  // No pick, or one the option no longer offers, starts with the default.
+  expect(pluginLaunchContextWithOptions(context, options, {}).size).toBe("low");
+  expect(pluginLaunchContextWithOptions(context, options, { size: "huge" }).size).toBe("low");
+  expect(pluginLaunchOptionValues(options, { size: "high" })).toEqual({
+    size: "high",
+    message: "replaced",
+  });
+});
+
+it("searches a list by label and description, and finds the entry a save added", () => {
+  const choices = [
+    { label: "Low", value: "low", description: "4 cores · 16 GB" },
+    { label: "High", value: "high", description: "16 cores · 64 GB" },
+    { label: "Custom", value: "custom" },
+  ];
+  const matches = (query: string) => pluginChoiceMatches(choices, query).map(({ value }) => value);
+  expect(matches("")).toEqual(["low", "high", "custom"]);
+  expect(matches(" HIGH ")).toEqual(["high"]);
+  expect(matches("16")).toEqual(["low", "high"]);
+  expect(matches("none")).toEqual([]);
+
+  expect(pluginCreatedChoice(["low", "high"], choices)?.value).toBe("custom");
+  expect(pluginCreatedChoice(["low", "high", "custom"], choices)).toBeNull();
+
+  // A create form reads its fields like any plugin form: numbers parsed, its own input kept.
+  const form = pluginChoiceCreateForm({
+    label: "New size",
+    command: "size-save",
+    fields: [
+      { name: "id", label: "Name", kind: "text", required: true },
+      { name: "cpus", label: "Cores", kind: "number" },
+    ],
+    input: { scope: "sizes" },
+  });
+  expect(pluginFormInput(form, { id: "huge", cpus: "32" })).toEqual({
+    scope: "sizes",
+    id: "huge",
+    cpus: 32,
+  });
+  expect(pluginFormInput(form, { id: "", cpus: "32" })).toBeNull();
 });
 
 it("opens a launch's thread only once its environment runs and is connected", () => {
