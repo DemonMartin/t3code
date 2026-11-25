@@ -7,6 +7,8 @@ import { shortcutLabelForCommand } from "../keybindings";
 import { primaryServerKeybindingsAtom } from "../state/server";
 import { pluginCatalogsAtom } from "../state/plugins";
 import { PluginEnvironmentLaunchDialog } from "./plugins/PluginEnvironmentLaunchDialog";
+import { pluginEnvironmentLaunchers } from "@t3tools/client-runtime/plugins";
+import type { PluginAutoLaunchControl } from "./chat/usePluginAutoLaunch";
 import type { PluginInput, EnvironmentId } from "@t3tools/contracts";
 import { PlusIcon, ScaleIcon } from "lucide-react";
 import { T, useGT } from "gt-react";
@@ -29,6 +31,8 @@ interface BranchToolbarEnvironmentSelectorProps {
   onAutoEnvironment?: (() => void) | undefined;
   launchContext?: (() => PluginInput) | undefined;
   onLaunchAccepted?: ((input: PluginInput) => void) | undefined;
+  /** Set while the draft's first send starts through a launcher instead of a machine. */
+  autoLaunch?: PluginAutoLaunchControl | undefined;
   envLocked: boolean;
   environmentId: EnvironmentId;
   availableEnvironments: readonly EnvironmentOption[];
@@ -40,12 +44,15 @@ interface BranchToolbarEnvironmentSelectorProps {
 const AUTO_VALUE = "action:auto";
 const ADD_MACHINE_VALUE = "action:add-machine";
 const environmentValue = (id: EnvironmentId) => `env:${id}`;
+const launcherValue = (launcher: { readonly pluginId: string; readonly viewId: string }) =>
+  `plugin:${launcher.pluginId}:${launcher.viewId}`;
 
 export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvironmentSelector({
   autoEnvironmentLabel,
   onAutoEnvironment,
   launchContext,
   onLaunchAccepted,
+  autoLaunch,
   envLocked,
   environmentId,
   availableEnvironments,
@@ -56,21 +63,12 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   const catalogs = useAtomValue(pluginCatalogsAtom);
   const launchers =
     launchContext && !envLocked
-      ? (
-          catalogs.find((row) => row.environmentId === environmentId)?.catalog?.plugins ?? []
-        ).flatMap((plugin) =>
-          plugin.status === "active"
-            ? plugin.views
-                .filter((view) => view.location === "environment-launcher")
-                .map((view) => ({
-                  pluginId: plugin.id,
-                  viewId: view.id,
-                  title: view.title,
-                  value: `plugin:${plugin.id}:${view.id}`,
-                }))
-            : [],
-        )
+      ? pluginEnvironmentLaunchers(
+          catalogs.find((row) => row.environmentId === environmentId)?.catalog,
+        ).map((launcher) => ({ ...launcher, value: launcherValue(launcher) }))
       : [];
+  const autoLaunchValue = autoLaunch ? launcherValue(autoLaunch.launcher) : null;
+  const autoLaunchTitle = autoLaunch?.active ? autoLaunch.launcher.title : undefined;
   const [launch, setLaunch] = useState<{
     pluginId: string;
     viewId: string;
@@ -126,10 +124,18 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
     <>
       <Select
         modal={false}
-        value={autoEnvironmentLabel ? AUTO_VALUE : environmentValue(environmentId)}
+        value={
+          autoLaunchTitle !== undefined && autoLaunchValue !== null
+            ? autoLaunchValue
+            : autoEnvironmentLabel
+              ? AUTO_VALUE
+              : environmentValue(environmentId)
+        }
         onValueChange={(value) => {
           const launcher = launchers.find((item) => item.value === value);
-          if (launcher && launchContext) {
+          if (launcher && launcher.value === autoLaunchValue) {
+            autoLaunch?.setActive(true);
+          } else if (launcher && launchContext) {
             setLaunch({
               ...launcher,
               context: { ...launchContext(), requestId: randomUUID() },
@@ -137,9 +143,14 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
           } else if (value === ADD_MACHINE_VALUE) {
             onAddToMachine?.();
           } else if (value === AUTO_VALUE) {
-            onAutoEnvironment?.();
+            autoLaunch?.setActive(false);
+            // Picking it while it is already the routing is the item's own click.
+            if (!autoEnvironmentLabel) onAutoEnvironment?.();
           } else if (value?.startsWith("env:")) {
-            onEnvironmentChange?.(value.slice(4) as EnvironmentId);
+            const next = value.slice(4) as EnvironmentId;
+            autoLaunch?.setActive(false);
+            // Leaving a launcher for the machine the draft is already on changes no machine.
+            if (autoEnvironmentLabel || next !== environmentId) onEnvironmentChange?.(next);
           }
         }}
         items={environmentItems}
@@ -156,7 +167,9 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
               />
             }
           >
-            {autoEnvironmentLabel ? (
+            {autoLaunchTitle !== undefined ? (
+              <PlusIcon className="size-3 shrink-0" aria-hidden="true" />
+            ) : autoEnvironmentLabel ? (
               <ScaleIcon className="size-3 shrink-0" aria-hidden="true" />
             ) : (
               <EnvironmentMachineIcon
@@ -169,7 +182,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
             </ComposerContextLabel>
           </TooltipTrigger>
           <TooltipPopup>
-            {autoEnvironmentLabel ?? activeEnvironment?.label ?? gt("Run on")}
+            {autoLaunchTitle ?? autoEnvironmentLabel ?? activeEnvironment?.label ?? gt("Run on")}
             {shortcutLabel ? ` · ${shortcutLabel}` : null}
           </TooltipPopup>
         </Tooltip>

@@ -94,6 +94,42 @@ export function pluginSettingsPages(catalog: PluginCatalog) {
     );
 }
 
+/** `autoLaunch` is null unless the view names a command its plugin registered. */
+export function pluginEnvironmentLaunchers(catalog: PluginCatalog | null | undefined) {
+  return (catalog?.plugins ?? []).flatMap((plugin) =>
+    plugin.status === "active"
+      ? plugin.views
+          .filter((view) => view.location === "environment-launcher")
+          .map((view) => {
+            const command = plugin.commands.find((command) => command.id === view.autoLaunch);
+            return {
+              pluginId: plugin.id,
+              viewId: view.id,
+              title: view.title,
+              autoLaunch: command
+                ? { commandId: command.id, permission: command.permission }
+                : null,
+            };
+          })
+      : [],
+  );
+}
+export type PluginEnvironmentLauncher = ReturnType<typeof pluginEnvironmentLaunchers>[number];
+export type PluginAutoLauncher = PluginEnvironmentLauncher & {
+  readonly autoLaunch: NonNullable<PluginEnvironmentLauncher["autoLaunch"]>;
+};
+
+/** The launcher a new draft's first send starts through, when a plugin asks for that. */
+export function pluginAutoLauncher(
+  catalog: PluginCatalog | null | undefined,
+): PluginAutoLauncher | null {
+  return (
+    pluginEnvironmentLaunchers(catalog).find(
+      (launcher): launcher is PluginAutoLauncher => launcher.autoLaunch !== null,
+    ) ?? null
+  );
+}
+
 export type PluginStatus = Extract<PluginBlock, { readonly kind: "status" }>;
 
 export function pluginThreadDetailsViews(catalog: PluginCatalog) {

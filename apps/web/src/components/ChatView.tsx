@@ -62,7 +62,11 @@ import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { freshSessionBannerItem } from "./chat/ComposerFreshSession";
 import { heldComposerSendBannerItem } from "./chat/ComposerHeldSendBanner";
 import { armFreshSession, disarmFreshSession, useFreshSessionArmed } from "./chat/freshSessionArms";
-import { cancelHeldComposerSend, useComposerSendHeld } from "./chat/preparingComposerImages";
+import {
+  cancelHeldComposerSend,
+  countPreparingComposerImages,
+  useComposerSendHeld,
+} from "./chat/preparingComposerImages";
 import { useUsageLimitsPanel } from "./chat/useUsageLimitsPanel";
 import { useWorktreeSetup } from "./chat/useWorktreeSetup";
 import { useChatShortcuts } from "./chat/useChatShortcuts";
@@ -79,6 +83,7 @@ import {
   type EnvironmentId,
   type MessageId,
   type ModelSelection,
+  type PluginInput,
   type PreviewAnnotationPayload,
   ProviderInstanceId,
   type ServerProvider,
@@ -399,6 +404,8 @@ import { ThreadVisitWatermark } from "./chat/ThreadVisitWatermark";
 import { ChatTerminalDrawers } from "./chat/ChatTerminalDrawers";
 import { ChatRightPanel } from "./chat/ChatRightPanel";
 import { useDraftEnvironmentRouting } from "./chat/useDraftEnvironmentRouting";
+import { usePluginAutoLauncher, usePluginAutoLaunchSend } from "./chat/usePluginAutoLaunch";
+import { PluginEnvironmentLaunchDialog } from "./plugins/PluginEnvironmentLaunchDialog";
 import { branchMismatchBannerItem, extensionStatusBannerItem } from "./chat/ThreadActivityBanners";
 import { ThreadNow } from "./chat/ThreadNow";
 import { threadRuntimeIsActive, type ThreadStructure } from "@t3tools/client-runtime/state/shell";
@@ -1395,6 +1402,12 @@ export default function ChatView(props: ChatViewProps) {
   // messages, so it would otherwise be offered a machine picker that does nothing.
   const canChangeEnvironment =
     hasMultipleEnvironments && !envLocked && draftId !== null && !draftThread?.promotedTo;
+  const pluginAutoLaunchEnvironmentId = activeThread?.environmentId ?? environmentId;
+  const pluginAutoLaunch = usePluginAutoLauncher({
+    environmentId: pluginAutoLaunchEnvironmentId,
+    threadId,
+    unsentDraft: isLocalDraftThread && !envLocked && !draftThread?.promotedTo,
+  });
 
   const loadBalancingSettings = useClientSettings((settings) => ({
     loadBalancingEnabled: settings.loadBalancingEnabled,
@@ -2961,7 +2974,9 @@ export default function ChatView(props: ChatViewProps) {
           (env) => env.environmentId === currentId,
         );
         const next = logicalProjectEnvironments[(index + 1) % logicalProjectEnvironments.length];
-        if (next) onEnvironmentChangeStable(next.environmentId);
+        if (!next) return;
+        pluginAutoLaunch?.setActive(false);
+        onEnvironmentChangeStable(next.environmentId);
       },
       "thread.steerQueuedMessage": ({ event }) =>
         routeKind !== "draft" && queuedRunsControlRef.current?.steerNext(event.repeat) === true,
@@ -3213,7 +3228,49 @@ export default function ChatView(props: ChatViewProps) {
     });
   };
   const onWorktreeSetupWorkLocallyStable = useStableCallback(onWorktreeSetupWorkLocally);
-  const onComposerSendStable = useStableCallback(onSend);
+  const pluginLaunchContext = () => {
+    const draft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+    return {
+      message: draft?.prompt ?? "",
+      hasAttachments:
+        (draft ? composerDraftHasUserContent({ ...draft, prompt: "" }) : false) ||
+        countPreparingComposerImages(composerDraftTargetKey) > 0,
+      modelSelection: JSON.stringify(
+        composerRef.current?.getSendContext().selectedModelSelection ??
+          composerSelectedModelSelection,
+      ),
+      runtimeMode,
+    };
+  };
+  const onPluginLaunchAccepted = (input: PluginInput) => {
+    const store = useComposerDraftStore.getState();
+    if (store.getComposerDraft(composerDraftTarget)?.prompt === input.message)
+      store.setPrompt(composerDraftTarget, "");
+  };
+  const pluginAutoLaunchSend = usePluginAutoLaunchSend(sendInFlightRef);
+  const onSendLatest = useStableCallback(onSend);
+  const onComposerSend = (...args: Parameters<typeof onSend>) => {
+    // A direct annotation or a detached dictation carries content the draft does not hold.
+    const claim =
+      pluginAutoLaunch?.active && args[3] === undefined && args[4] === undefined && activeProject
+        ? pluginAutoLaunchSend.claimSend({
+            environmentId: pluginAutoLaunchEnvironmentId,
+            launcher: pluginAutoLaunch.launcher,
+            context: {
+              ...pluginLaunchContext(),
+              projectDirectory: activeProject.workspaceRoot,
+              projectTitle: activeProject.title,
+            },
+            multipleModels: multipleModelSelections !== null,
+            isCurrent: () => currentRouteThreadKeyRef.current === routeThreadKey,
+            onClaimed: onPluginLaunchAccepted,
+          })
+        : null;
+    if (claim === null) return onSend(...args);
+    args[0]?.preventDefault();
+    return claim.then((claimed) => (claimed ? undefined : onSendLatest(...args)));
+  };
+  const onComposerSendStable = useStableCallback(onComposerSend);
   const sendPreviewAnnotation = (
     annotation: PreviewAnnotationPayload,
     image: ComposerImageAttachment | null,
@@ -4017,30 +4074,8 @@ export default function ChatView(props: ChatViewProps) {
                             {showComposerContextStrip && (
                               <div className="pointer-events-auto">
                                 <BranchToolbar
-                                  pluginLaunchContext={() => {
-                                    const draft = useComposerDraftStore
-                                      .getState()
-                                      .getComposerDraft(composerDraftTarget);
-                                    return {
-                                      message: draft?.prompt ?? "",
-                                      hasAttachments: draft
-                                        ? composerDraftHasUserContent({ ...draft, prompt: "" })
-                                        : false,
-                                      modelSelection: JSON.stringify(
-                                        composerRef.current?.getSendContext()
-                                          .selectedModelSelection ?? composerSelectedModelSelection,
-                                      ),
-                                      runtimeMode,
-                                    };
-                                  }}
-                                  onPluginLaunchAccepted={(input) => {
-                                    const store = useComposerDraftStore.getState();
-                                    if (
-                                      store.getComposerDraft(composerDraftTarget)?.prompt ===
-                                      input.message
-                                    )
-                                      store.setPrompt(composerDraftTarget, "");
-                                  }}
+                                  pluginLaunchContext={pluginLaunchContext}
+                                  onPluginLaunchAccepted={onPluginLaunchAccepted}
                                   forceNewWorktree={multipleModelSelections !== null}
                                   ref={branchToolbarRef}
                                   environmentId={activeThread.environmentId}
@@ -4128,6 +4163,13 @@ export default function ChatView(props: ChatViewProps) {
                 key={`${activeThreadKey}:${previewMiniPlayerSourceKey(shownPreviewMiniPlayer.source)}`}
                 threadRef={activeThreadRef}
                 miniPlayer={shownPreviewMiniPlayer}
+              />
+            ) : null}
+
+            {pluginAutoLaunchSend.launch ? (
+              <PluginEnvironmentLaunchDialog
+                {...pluginAutoLaunchSend.launch}
+                onClose={pluginAutoLaunchSend.closeLaunch}
               />
             ) : null}
 

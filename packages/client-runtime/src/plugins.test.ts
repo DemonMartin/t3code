@@ -12,6 +12,8 @@ import {
   pluginViewResult,
   pluginGraphLayout,
   pluginThreadPanels,
+  pluginAutoLauncher,
+  pluginEnvironmentLaunchers,
   type PluginForm,
 } from "./plugins.ts";
 
@@ -299,4 +301,55 @@ it("hides repository-required thread panels until a Git repository is confirmed"
   expect(
     pluginThreadPanels({ ...catalog, plugins: [{ ...plugin, status: "disabled" }] }, true),
   ).toEqual([]);
+});
+
+it("starts new drafts through the launcher whose auto-launch command its plugin registered", () => {
+  const view = {
+    title: "New sandbox",
+    location: "environment-launcher" as const,
+    permission: "environment:maintain" as const,
+  };
+  const plugin = {
+    id: "sandboxes",
+    name: "Sandboxes",
+    version: "1.0.0",
+    status: "active" as const,
+    commands: [
+      {
+        id: "launch",
+        title: "Launch",
+        description: "Start a sandboxed thread",
+        permission: "environment:maintain" as const,
+        agent: false,
+      },
+    ],
+    views: [
+      { ...view, id: "manual" },
+      { ...view, id: "missing", autoLaunch: "withdrawn" },
+      { ...view, id: "launcher", autoLaunch: "launch" },
+      { ...view, id: "settings", location: "settings" as const, autoLaunch: "launch" },
+    ],
+  };
+  const catalog = { configurationError: false, plugins: [plugin] };
+  const auto = { commandId: "launch", permission: "environment:maintain" };
+  expect(
+    pluginEnvironmentLaunchers(catalog).map(({ viewId, autoLaunch }) => [viewId, autoLaunch]),
+  ).toEqual([
+    ["manual", null],
+    ["missing", null],
+    ["launcher", auto],
+  ]);
+  expect(pluginAutoLauncher(catalog)).toEqual({
+    pluginId: "sandboxes",
+    viewId: "launcher",
+    title: "New sandbox",
+    autoLaunch: auto,
+  });
+  expect(
+    pluginAutoLauncher({ ...catalog, plugins: [{ ...plugin, status: "stopped" }] }),
+  ).toBeNull();
+  expect(
+    pluginAutoLauncher({ ...catalog, plugins: [{ ...plugin, views: plugin.views.slice(0, 2) }] }),
+  ).toBeNull();
+  expect(pluginAutoLauncher(null)).toBeNull();
 });
