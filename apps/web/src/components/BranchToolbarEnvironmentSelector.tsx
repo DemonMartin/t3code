@@ -10,7 +10,7 @@ import { PluginEnvironmentLaunchDialog } from "./plugins/PluginEnvironmentLaunch
 import { pluginEnvironmentLaunchers } from "@t3tools/client-runtime/plugins";
 import type { PluginAutoLaunchControl } from "./chat/usePluginAutoLaunch";
 import type { PluginInput, EnvironmentId } from "@t3tools/contracts";
-import { PlusIcon, ScaleIcon } from "lucide-react";
+import { BoxIcon, PlusIcon, ScaleIcon } from "lucide-react";
 import { T, useGT } from "gt-react";
 import { memo, useState } from "react";
 
@@ -168,7 +168,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
             }
           >
             {autoLaunchTitle !== undefined ? (
-              <PlusIcon className="size-3 shrink-0" aria-hidden="true" />
+              <BoxIcon className="size-3 shrink-0" aria-hidden="true" />
             ) : autoEnvironmentLabel ? (
               <ScaleIcon className="size-3 shrink-0" aria-hidden="true" />
             ) : (
@@ -218,7 +218,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
             ))}
             {launchers.map((launcher) => (
               <SelectItem key={launcher.value} value={launcher.value}>
-                <PlusIcon aria-hidden="true" className="size-3" />
+                <BoxIcon aria-hidden="true" className="size-3" />
                 {launcher.title}
               </SelectItem>
             ))}
