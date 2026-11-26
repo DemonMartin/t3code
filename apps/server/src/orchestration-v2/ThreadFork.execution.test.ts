@@ -28,6 +28,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import { ClaudeProviderCapabilitiesV2 } from "./Adapters/ClaudeAdapterV2.ts";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -562,8 +563,8 @@ it.effect.each([
               contextHandoffId: null,
             },
           },
-          // Each message alone exceeds the default 16k handoff budget, so a
-          // portable handoff omits both whole items.
+          // A handoff shortens a long message to 12k; with the smallest budget set below,
+          // that still exceeds it, so a portable handoff omits both whole items.
           {
             id: EventId.make("fork-compact-user-item"),
             type: "turn-item.updated",
@@ -646,6 +647,10 @@ it.effect.each([
             target === claude ? [claude] : [claude, target],
           ),
         ),
+      ),
+      Effect.provideService(
+        ConfigProvider.ConfigProvider,
+        ConfigProvider.fromUnknown({ T3CODE_CONTEXT_HANDOFF_TOKEN_CAP: 1_024 }),
       ),
     );
   },

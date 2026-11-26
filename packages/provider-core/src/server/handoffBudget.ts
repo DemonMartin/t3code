@@ -12,8 +12,10 @@ import { withMessageSenderNote } from "@t3tools/contracts";
 
 import * as Config from "effect/Config";
 
-export const DEFAULT_HANDOFF_TOKEN_CAP = 16_000;
-const HANDOFF_BYTE_CAP = 64_000;
+// Counted in UTF-8 bytes, about four to a token: enough for the recent work of a long session,
+// which a model taking over needs to continue it. Small windows still get less; see handoffBudget.
+export const DEFAULT_HANDOFF_TOKEN_CAP = 96_000;
+const HANDOFF_BYTE_CAP = 256_000;
 export const handoffTokenCapConfig = Config.Int("T3CODE_CONTEXT_HANDOFF_TOKEN_CAP").pipe(
   Config.withDefault(DEFAULT_HANDOFF_TOKEN_CAP),
   Config.map((value) => Math.max(1_024, Math.min(HANDOFF_BYTE_CAP, value))),
@@ -162,6 +164,37 @@ export function historicalMessage(
     case "proposed_plan":
       text = item.markdown;
       break;
+    case "dynamic_tool":
+      text = [
+        `Tool: ${item.toolName ?? "unknown"}`,
+        `Input: ${plainText(item.input)}`,
+        ...(item.output === undefined ? [] : [plainText(item.output)]),
+      ].join("\n");
+      break;
+    case "file_search":
+      text = [
+        `File search: ${item.pattern ?? ""}`,
+        ...(item.results ?? []).map(
+          (result) =>
+            `${result.fileName}${result.line === undefined ? "" : `:${result.line}`}${result.preview === undefined ? "" : ` ${result.preview}`}`,
+        ),
+      ].join("\n");
+      break;
+    case "web_search":
+      text = [
+        `Web search: ${(item.patterns ?? []).join("; ")}`,
+        ...(item.results ?? []).map((result) =>
+          [result.title, result.url, result.snippet].filter(Boolean).join(" - "),
+        ),
+      ].join("\n");
+      break;
+    case "todo_list":
+      text = [
+        "Todo list:",
+        ...item.steps.map((step) => `- [${step.status}] ${step.text}`),
+        ...(item.explanation === undefined ? [] : [item.explanation]),
+      ].join("\n");
+      break;
     default:
       return null;
   }
@@ -174,6 +207,34 @@ export function historicalMessage(
     providerThreadId: item.providerThreadId,
     status: item.status,
     kind: item.type,
+  };
+}
+
+const plainText = (value: unknown): string =>
+  typeof value === "string" ? value : (JSON.stringify(value) ?? "");
+
+// What the user and the agent said is kept longer than what a tool printed.
+const HANDOFF_MESSAGE_MAX_CHARS = 12_000;
+const HANDOFF_WORK_MAX_CHARS = 3_000;
+
+/**
+ * Shortens an item so a long one takes a share of the handoff instead of being left out whole.
+ * The end is kept longer than the start: a command's result and a reply's conclusion sit there.
+ * The receiving agent can read the whole item by its ID.
+ */
+export function boundedHistoricalMessage(
+  message: OrchestrationV2HistoricalMessage,
+): OrchestrationV2HistoricalMessage {
+  const limit =
+    message.kind === "user_message" || message.kind === "assistant_message"
+      ? HANDOFF_MESSAGE_MAX_CHARS
+      : HANDOFF_WORK_MAX_CHARS;
+  if (message.text.length <= limit) return message;
+  const head = Math.floor(limit / 3);
+  const cut = message.text.length - limit;
+  return {
+    ...message,
+    text: `${message.text.slice(0, head)}\n[... ${cut} characters left out; read item ${message.itemId} for all of it ...]\n${message.text.slice(message.text.length - (limit - head))}`,
   };
 }
 
