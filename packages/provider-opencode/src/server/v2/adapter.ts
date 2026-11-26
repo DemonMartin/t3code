@@ -63,6 +63,7 @@ import * as Stream from "effect/Stream";
 
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as OpenCode2Client from "./OpenCode2Client.ts";
+import * as StepCut from "./stepCut.ts";
 import * as OpenCode2Server from "./OpenCode2Server.ts";
 import * as OpenCodeRuntime from "../OpenCodeRuntime.ts";
 import { readableProviderErrorMessage } from "../providerErrorMessage.ts";
@@ -143,6 +144,8 @@ const OpenCode2ProviderCapabilities = {
     canCreateEmptyThread: true,
     canReadThreadSnapshot: true,
     canRollbackThread: true,
+    canRollbackWithinTurn: true,
+    canCutStep: true,
     canForkThread: true,
     canForkFromTurn: true,
     canForkFromSubagentThread: false,
@@ -5534,6 +5537,42 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           if (!threads.has(sessionId)) {
             yield* runtime.resumeThread({ providerThread });
             yield* ensureQuiet(sessionId, "roll back");
+          }
+          const cut = target.type === "provider_turn" ? target.cut : undefined;
+          if (cut !== undefined) {
+            const step = yield* StepCut.stepBoundary(client, sessionId, providerThread.id, cut);
+            if (cut.only === true) {
+              const state = threads.get(sessionId);
+              if (step !== null && (!step.agent || state === undefined)) {
+                return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: OPENCODE_PROVIDER,
+                  detail: "Only a step the agent took can be cut out of an OpenCode session.",
+                });
+              }
+              if (step !== null && state !== undefined) {
+                yield* StepCut.removeMessage(
+                  connection,
+                  sessionId,
+                  state.directory,
+                  step.messageId,
+                );
+              }
+              return {
+                ...(yield* snapshotOf(providerThread, sessionId)),
+                ...(step === null
+                  ? {}
+                  : {
+                      cutFromOrdinal: step.ordinal,
+                      ...(step.next === undefined ? {} : { cutToOrdinal: step.next }),
+                    }),
+              };
+            }
+            // The step's message sits before every later turn's prompt, so one revert cuts both.
+            if (step !== null) yield* rollBackTo(sessionId, SessionMessage.ID.make(step.messageId));
+            return {
+              ...(yield* snapshotOf(providerThread, sessionId)),
+              ...(step === null ? {} : { cutFromOrdinal: step.ordinal }),
+            };
           }
           const boundary = yield* boundaryAfter(
             rollbackInput.providerThreadTurns,

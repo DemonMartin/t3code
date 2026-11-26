@@ -43,6 +43,8 @@ import * as OpenCodeServerOwner from "./OpenCodeServerOwner.ts";
 const OPENCODE_PRESENTATION = {
   displayName: "OpenCode",
   showInteractionModeToggle: false,
+  // OpenCode 2 only; an OpenCode 1 session refuses the rewind with its reason.
+  supportsStepRollback: true,
 } as const;
 
 class OpenCodeProbeError extends Schema.TaggedError<OpenCodeProbeError>()("OpenCodeProbeError", {

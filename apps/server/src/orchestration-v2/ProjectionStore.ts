@@ -50,8 +50,7 @@ import type {
   OrchestrationV2ThreadProjection,
   OrchestrationV2TurnItem,
   GuestShareId,
-  ProviderThreadId,
-  ProviderTurnId,
+  ModelSelection,
   RunAttemptId,
 } from "@t3tools/contracts";
 import {
@@ -82,6 +81,8 @@ import {
   CheckpointId,
   EnvironmentId,
   ThreadId,
+  ProviderThreadId,
+  ProviderTurnId,
   TurnItemId,
   NodeId,
   ProjectId,
@@ -323,6 +324,8 @@ export interface ProjectionCheckpointRollbackContext {
   readonly rootNodes: ReadonlyArray<OrchestrationV2ExecutionNode>;
   /** Ready checkpoints of the target scope and of repository scopes that the rollback discards. */
   readonly staleCheckpoints: ReadonlyArray<OrchestrationV2Checkpoint>;
+  /** The thread's other agents whose conversations hold turns the rollback discards. */
+  readonly staleProviderThreads: ReadonlyArray<OrchestrationV2ProviderThread>;
 }
 
 export interface ProjectionProviderControlContext {
@@ -548,6 +551,19 @@ export interface OlderSettledThreadsListing {
   readonly threadIds: ReadonlyArray<ThreadId>;
   /** Only for `limit: 0`. */
   readonly counts: ReadonlyArray<OrchestrationV2OlderSettledCount>;
+}
+
+/** A turn item's place in its thread: enough to find it in the provider's own history. */
+export interface ProjectionTurnItemRef {
+  readonly id: TurnItemId;
+  readonly runId: RunId | null;
+  readonly providerThreadId: ProviderThreadId | null;
+  readonly providerTurnId: ProviderTurnId | null;
+  readonly ordinal: number;
+  readonly type: OrchestrationV2TurnItem["type"];
+  readonly nativeItemId: string | null;
+  /** A user message's id: how a provider names a steer it was sent. */
+  readonly messageId?: string;
 }
 
 export interface ProjectionStoreV2Shape {
@@ -830,6 +846,8 @@ export interface ProjectionStoreV2Shape {
       readonly providerThreadId: ProviderThreadId;
       readonly checkpointId: CheckpointId;
       readonly scopeId: CheckpointScopeId;
+      /** The rollback makes this provider thread, with this model, the thread's agent. */
+      readonly modelSelection?: ModelSelection;
     },
   ) => Effect.Effect<ProjectionCheckpointRollbackContext, ProjectionStoreV2Error>;
   readonly getRunMessage: (
@@ -840,6 +858,16 @@ export interface ProjectionStoreV2Shape {
     threadId: ThreadId,
     runId: RunId,
   ) => Effect.Effect<OrchestrationV2Run | undefined, ProjectionStoreV2Error>;
+  /** Where one of the thread's own items sits, without its body. */
+  readonly getTurnItemRef: (
+    threadId: ThreadId,
+    itemId: TurnItemId,
+  ) => Effect.Effect<ProjectionTurnItemRef | undefined, ProjectionStoreV2Error>;
+  /** A run's items in timeline order, without their bodies. */
+  readonly getRunItemRefs: (
+    threadId: ThreadId,
+    runId: RunId,
+  ) => Effect.Effect<ReadonlyArray<ProjectionTurnItemRef>, ProjectionStoreV2Error>;
   /**
    * One snapshot: the `windowSize` runs that ended last, unfinished runs, the runs of `taskIds` and
    * their wakes. `runsFloor` is set when older runs were left out; every run that ran after it is
@@ -906,6 +934,8 @@ type ProjectionWindow = Omit<
 > & {
   readonly suppressLocal?: boolean | undefined;
   readonly forkRunIdsJson?: string | undefined;
+  /** When the fork reading its source's rows was made: a later rewind into a run leaves it alone. */
+  readonly forkCreatedAt?: DateTime.Utc | undefined;
   readonly historyAnchor?: { readonly threadId: ThreadId; readonly itemId: TurnItemId } | undefined;
 };
 
@@ -1006,6 +1036,10 @@ function preserveRunRecordedFields(
       : {}),
     // Only a submission sets the output; a lifecycle write carries it as it was when read.
     ...(current.output !== undefined ? { output: current.output } : {}),
+    // Only a rewind writes these; a lifecycle write carries the run without them.
+    ...(next.truncations === undefined && current.truncations !== undefined
+      ? { truncations: current.truncations }
+      : {}),
   };
 }
 
@@ -1684,21 +1718,31 @@ function isTurnItemAtOrBeforeRun(input: {
 // inherited history while retaining cancellation evidence for undelivered input.
 function createInheritedTurnItemVisibility(
   source: Parameters<typeof createOrchestrationV2TurnItemVisibility>[0],
+  forkCreatedAt: DateTime.Utc,
 ) {
   const cancelledRunIds = new Set(
     source.attempts
       .filter((attempt) => attempt.status === "cancelled")
       .map((attempt) => attempt.runId),
   );
+  const forkedAt = DateTime.toEpochMillis(forkCreatedAt);
   return createOrchestrationV2TurnItemVisibility({
     ...source,
-    runs: source.runs.flatMap((run) =>
-      run.status !== "rolled_back"
-        ? [run]
-        : cancelledRunIds.has(run.id)
-          ? [{ ...run, status: "cancelled" as const }]
-          : [],
-    ),
+    runs: source.runs.flatMap((run) => {
+      // The fork received what a later rewind into the run cut.
+      const kept =
+        run.truncations === undefined
+          ? run
+          : {
+              ...run,
+              truncations: run.truncations.filter((cut) => Date.parse(cut.at) < forkedAt),
+            };
+      return kept.status !== "rolled_back"
+        ? [kept]
+        : cancelledRunIds.has(kept.id)
+          ? [{ ...kept, status: "cancelled" as const }]
+          : [];
+    }),
   });
 }
 
@@ -1737,6 +1781,8 @@ function visibleTurnItemsThroughRun(input: {
   readonly sourceProjection: OrchestrationV2ThreadProjection;
   readonly sourceRunId: NonNullable<OrchestrationV2TurnItem["runId"]>;
   readonly inheritedRunIds: ReadonlyArray<RunId>;
+  /** A fork keeps the steps a later rewind cut from a run it inherited. */
+  readonly forkCreatedAt: DateTime.Utc;
 }): Array<Omit<OrchestrationV2ProjectedTurnItem, "position">> {
   const sourceRun = input.sourceProjection.runs.find((run) => run.id === input.sourceRunId);
   if (sourceRun === undefined) {
@@ -1744,11 +1790,14 @@ function visibleTurnItemsThroughRun(input: {
   }
 
   const runOrdinalById = forkMemberRunOrdinals(input.sourceProjection.runs, input.inheritedRunIds);
-  const isVisible = createInheritedTurnItemVisibility({
-    runs: input.sourceProjection.runs,
-    attempts: input.sourceProjection.attempts,
-    items: input.sourceProjection.turnItems,
-  });
+  const isVisible = createInheritedTurnItemVisibility(
+    {
+      runs: input.sourceProjection.runs,
+      attempts: input.sourceProjection.attempts,
+      items: input.sourceProjection.turnItems,
+    },
+    input.forkCreatedAt,
+  );
   const inheritedPrefix = input.sourceProjection.visibleTurnItems
     .filter(
       (row) => row.item.threadId !== input.sourceProjection.thread.id || row.item.type === "fork",
@@ -1803,6 +1852,7 @@ function buildVisibleTurnItems(input: {
           sourceProjection: input.sourceProjection,
           sourceRunId: forkedFrom.runId,
           inheritedRunIds: input.inheritedRunIds ?? [],
+          forkCreatedAt: input.projection.thread.createdAt,
         });
   const markerItem = makeForkMarkerTurnItem({
     targetProjection: input.projection,
@@ -2675,10 +2725,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 payload_json = ${keepRecordedRunOutput(
                   keepRecordedRunField(
                     keepRecordedRunField(
-                      keepRecordedRunField(sql`excluded.payload_json`, "$.delegatedCompletion"),
-                      "$.restartCancelledBackgroundWork",
+                      keepRecordedRunField(
+                        keepRecordedRunField(sql`excluded.payload_json`, "$.delegatedCompletion"),
+                        "$.restartCancelledBackgroundWork",
+                      ),
+                      "$.explicitQueue",
                     ),
-                    "$.explicitQueue",
+                    "$.truncations",
                   ),
                 )}
             `;
@@ -3497,6 +3550,30 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                       ${window.requiredRunId ?? null} IS NOT NULL
                       OR run.status IS NULL
                       OR run.status <> 'rolled_back'
+                    )
+                    -- A rewind into a run hides its later items; a fork keeps what it received.
+                    AND NOT (
+                      instr(run.payload_json, '"truncations":') > 0
+                      AND EXISTS (
+                        SELECT 1 FROM json_each(run.payload_json, '$.truncations') AS cut
+                        WHERE item.ordinal >= json_extract(cut.value, '$.fromOrdinal')
+                          -- One step cut out: it ends at toOrdinal and takes no user message.
+                          AND (
+                            json_extract(cut.value, '$.toOrdinal') IS NULL
+                            OR (
+                              item.ordinal < json_extract(cut.value, '$.toOrdinal')
+                              AND item.type <> 'user_message'
+                            )
+                          )
+                          AND (
+                            ${window.requiredRunId ?? null} IS NULL
+                            OR julianday(json_extract(cut.value, '$.at')) < julianday(${
+                              window.forkCreatedAt === undefined
+                                ? null
+                                : DateTime.formatIso(window.forkCreatedAt)
+                            })
+                          )
+                      )
                     )
                     AND NOT (
                       item.type = 'user_message'
@@ -4948,6 +5025,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   deferWork: window.deferWork,
                   requiredRunId: forkedFrom.runId,
                   forkRunIdsJson: yield* encodeForkRunIds(inheritedRunIds),
+                  forkCreatedAt: projection.thread.createdAt,
                   suppressLocal: anchor === undefined || anchorIsInDescendant,
                   ...(anchor === undefined || anchorIsInDescendant
                     ? {}
@@ -5679,6 +5757,24 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             AND type IN ('user_message','assistant_message','command_execution','error',
               'run_interrupt_result','file_change','proposed_plan')
             AND ${runIds === undefined ? sql`1` : sql`run_id IN ${sql.in(runIds)}`}
+            -- What a rewind into a run cut is no longer part of the conversation.
+            AND NOT EXISTS (
+              SELECT 1
+              FROM orchestration_v2_projection_runs AS run,
+                json_each(run.payload_json, '$.truncations') AS cut
+              WHERE run.run_id = orchestration_v2_projection_turn_items.run_id
+                AND instr(run.payload_json, '"truncations":') > 0
+                AND orchestration_v2_projection_turn_items.ordinal
+                  >= json_extract(cut.value, '$.fromOrdinal')
+                AND (
+                  json_extract(cut.value, '$.toOrdinal') IS NULL
+                  OR (
+                    orchestration_v2_projection_turn_items.ordinal
+                      < json_extract(cut.value, '$.toOrdinal')
+                    AND orchestration_v2_projection_turn_items.type <> 'user_message'
+                  )
+                )
+            )
           ORDER BY ordinal ASC, turn_item_id ASC
         `;
         return yield* decodeRows(decodeTurnItemPayload, threadId)(rows);
@@ -6557,6 +6653,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               runsToRollback: [],
               rootNodes: [],
               staleCheckpoints: [],
+              staleProviderThreads: [],
             };
             if (
               providerThread === undefined ||
@@ -6565,8 +6662,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               scope === undefined ||
               checkpoint.scopeId !== scope.id ||
               checkpoint.status === "stale" ||
-              providerThread.id !== thread.activeProviderThreadId ||
-              providerThread.providerInstanceId !== thread.modelSelection.instanceId
+              (target.modelSelection === undefined
+                ? providerThread.id !== thread.activeProviderThreadId
+                : providerThread.appThreadId !== threadId || providerThread.ownerNodeId !== null) ||
+              providerThread.providerInstanceId !==
+                (target.modelSelection ?? thread.modelSelection).instanceId
             )
               return context;
 
@@ -6605,7 +6705,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               ]);
             const targetAttempt = (yield* decodeRollbackTargetAttempts(attemptRows))[0];
             const runsToRollback = yield* decodeRows(decodeRunPayload, threadId)(runRows);
-            const [nodeRows, turnRows] = yield* Effect.all([
+            const staleProviderThreadIds = Array.from(
+              new Set(
+                runsToRollback.flatMap((run) =>
+                  run.providerThreadId === null || run.providerThreadId === providerThread.id
+                    ? []
+                    : [run.providerThreadId],
+                ),
+              ),
+            );
+            const [nodeRows, turnRows, staleProviderRows] = yield* Effect.all([
               sql<PayloadRow>`SELECT payload_json FROM orchestration_v2_projection_nodes
             WHERE thread_id = ${threadId} AND ${sql.in(
               "node_id",
@@ -6618,11 +6727,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               OR provider_turn_id = ${targetAttempt?.providerTurnId ?? null}
               OR run_attempt_id = ${targetAttempt?.id ?? null})
             ORDER BY provider_thread_id ASC, ordinal ASC`,
+              sql<PayloadRow>`SELECT payload_json FROM orchestration_v2_projection_provider_threads
+            WHERE thread_id = ${threadId} AND owner_node_id IS NULL
+              AND ${sql.in("provider_thread_id", staleProviderThreadIds)}
+            ORDER BY provider_thread_id ASC`,
             ]);
             return {
               ...context,
               targetAttempt,
               runsToRollback,
+              staleProviderThreads: yield* decodeRows(
+                decodeProviderThreadPayload,
+                threadId,
+              )(staleProviderRows),
               providerSession:
                 sessionRows[0] === undefined
                   ? undefined
@@ -6745,6 +6862,52 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           }),
         )
         .pipe(Effect.mapError(controlReadError(threadId)));
+
+    const readTurnItemRefs = (threadId: ThreadId, where: Statement.Fragment) =>
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* requireThread(threadId);
+            const rows = yield* sql<{
+              readonly turn_item_id: string;
+              readonly run_id: string | null;
+              readonly provider_thread_id: string | null;
+              readonly provider_turn_id: string | null;
+              readonly ordinal: number;
+              readonly type: OrchestrationV2TurnItem["type"];
+              readonly native_item_id: string | null;
+              readonly message_id: string | null;
+            }>`
+          SELECT turn_item_id, run_id, provider_thread_id, provider_turn_id, ordinal, type,
+            json_extract(payload_json, '$.nativeItemRef.nativeId') AS native_item_id,
+            CASE WHEN type = 'user_message' THEN json_extract(payload_json, '$.messageId') END
+              AS message_id
+          FROM orchestration_v2_projection_turn_items
+          WHERE thread_id = ${threadId} AND ${where}
+          ORDER BY ordinal ASC, turn_item_id ASC`;
+            return rows.map((row): ProjectionTurnItemRef => ({
+              id: TurnItemId.make(row.turn_item_id),
+              runId: row.run_id === null ? null : RunId.make(row.run_id),
+              providerThreadId:
+                row.provider_thread_id === null
+                  ? null
+                  : ProviderThreadId.make(row.provider_thread_id),
+              providerTurnId:
+                row.provider_turn_id === null ? null : ProviderTurnId.make(row.provider_turn_id),
+              ordinal: row.ordinal,
+              type: row.type,
+              nativeItemId: row.native_item_id,
+              ...(row.message_id === null ? {} : { messageId: row.message_id }),
+            }));
+          }),
+        )
+        .pipe(Effect.mapError(controlReadError(threadId)));
+
+    const getTurnItemRef: ProjectionStoreV2Shape["getTurnItemRef"] = (threadId, itemId) =>
+      readTurnItemRefs(threadId, sql`turn_item_id = ${itemId}`).pipe(Effect.map((refs) => refs[0]));
+
+    const getRunItemRefs: ProjectionStoreV2Shape["getRunItemRefs"] = (threadId, runId) =>
+      readTurnItemRefs(threadId, sql`run_id = ${runId}`);
 
     const canStartQueuedRun: ProjectionStoreV2Shape["canStartQueuedRun"] = (threadId) =>
       sql
@@ -7258,11 +7421,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             source.records.runs,
             yield* getForkSourceRunIds(threadId),
           );
-          const isInheritedVisible = createInheritedTurnItemVisibility({
-            runs: source.records.runs,
-            attempts: source.records.attempts,
-            items: source.local.map((row) => row.item),
-          });
+          const isInheritedVisible = createInheritedTurnItemVisibility(
+            {
+              runs: source.records.runs,
+              attempts: source.records.attempts,
+              items: source.local.map((row) => row.item),
+            },
+            records.thread.createdAt,
+          );
           inherited = [
             ...source.visible.filter(
               (row) => row.item.threadId !== fork.threadId || row.item.type === "fork",
@@ -7446,6 +7612,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           AND NOT (json_extract(payload_json, '$.forkedFrom.type') IS 'run'
             AND json_extract(payload_json, '$.lineage.sideChat') IS NOT 1)`;
       if (ownRowsOnly.length === 0) return null;
+      // A rewind into a run hides rows by ordinal, which only the full index works out.
+      const cutRuns = yield* sql`
+        SELECT 1 FROM orchestration_v2_projection_runs
+        WHERE thread_id = ${threadId} AND instr(payload_json, '"truncations":') > 0
+        LIMIT 1`;
+      if (cutRuns.length > 0) return null;
       const records = yield* getThreadRecords(threadId, []);
       if (inheritedRunFork(records.thread) !== null) return null;
       // Only these runs and attempts can hide rows, and their columns are all visibility reads.
@@ -10029,6 +10201,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getRunMessage: readOnReader(getRunMessage),
       getDelegatedChildControls: readOnReader(getDelegatedChildControls),
       getRun: readOnReader(getRun),
+      getTurnItemRef: readOnReader(getTurnItemRef),
+      getRunItemRefs: readOnReader(getRunItemRefs),
       canStartQueuedRun: readOnReader(canStartQueuedRun),
       getHeldQueuedRuns: readOnReader(getHeldQueuedRuns),
       getPendingNativeUserInputs: readOnReader(getPendingNativeUserInputs),

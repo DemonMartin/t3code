@@ -4,7 +4,9 @@ import {
   CheckpointId,
   CheckpointRef,
   EventId,
+  isOrchestrationV2RunItemTruncated,
   MessageId,
+  type ModelSelection,
   NodeId,
   type OrchestrationV2DomainEvent,
   ProviderDriverKind,
@@ -17,6 +19,7 @@ import {
   ProviderSessionId,
   ProviderThreadId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
@@ -228,6 +231,7 @@ it.effect.each([
       targetAttempt: undefined,
       rolledBackAttemptIds: [],
       staleCheckpoints: [],
+      staleProviderThreads: [],
       rootNodes: [],
       providerTurns: [],
     } as unknown as ProjectionStore.ProjectionCheckpointRollbackContext;
@@ -452,6 +456,7 @@ it.effect.each([
         targetAttempt: undefined,
         rolledBackAttemptIds: [],
         staleCheckpoints: [],
+        staleProviderThreads: [],
         rootNodes: [],
         providerTurns: [],
       } as unknown as ProjectionStore.ProjectionCheckpointRollbackContext;
@@ -792,11 +797,42 @@ const seedRollbackHistory = Effect.gen(function* () {
     });
   }
 
+  // Run 2's rows: the one that opens it, then four things the agent did.
+  const itemId = (ordinal: number) => TurnItemId.make(`rollback-history-item-${ordinal}`);
+  for (const ordinal of [200, 201, 202, 203, 204]) {
+    yield* apply({
+      type: "turn-item.updated",
+      payload: {
+        id: itemId(ordinal),
+        threadId,
+        runId: runId(2),
+        nodeId: nodeId(2),
+        providerThreadId,
+        providerTurnId: turnId(2),
+        nativeItemRef: { driver, nativeId: `native-item-${ordinal}`, strength: "strong" },
+        parentItemId: null,
+        ordinal,
+        status: "completed",
+        title: null,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        type: "reasoning",
+        text: `step ${ordinal}`,
+        streaming: false,
+      },
+    });
+  }
+
   const rollbackCounts: number[] = [];
+  const cuts: Array<ProviderAdapter.ProviderAdapterV2TurnCut | undefined> = [];
+  /** What the provider reports as the first item it cut; absent leaves the item asked for. */
+  const cutFrom: { ordinal?: number; next?: number } = {};
   const restored: CheckpointId[] = [];
   const deletedRefs: CheckpointId[] = [];
   const discardedRepositoryOrdinals: number[] = [];
   const committed: OrchestrationV2DomainEvent[] = [];
+  const detached: ProviderSessionId[] = [];
   const serviceLayer = layerCheckpointRollbackService.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -840,35 +876,61 @@ const seedRollbackHistory = Effect.gen(function* () {
               rollbackThread: (input: ProviderAdapter.ProviderAdapterV2RollbackThreadInput) =>
                 Effect.gen(function* () {
                   rollbackCounts.push(yield* resolveCodexRollbackTurnCount(input));
-                  return { providerThread: input.providerThread };
+                  if (input.target.type === "provider_turn") cuts.push(input.target.cut);
+                  return {
+                    providerThread: input.providerThread,
+                    ...(cutFrom.ordinal === undefined ? {} : { cutFromOrdinal: cutFrom.ordinal }),
+                    ...(cutFrom.next === undefined ? {} : { cutToOrdinal: cutFrom.next }),
+                  };
                 }),
             } as never),
+          detach: ({ providerSessionId }) =>
+            Effect.sync(() => {
+              detached.push(providerSessionId);
+            }),
         }),
         Layer.mock(RuntimePolicy.RuntimePolicyV2)({ resolve: () => Effect.succeed({} as never) }),
       ),
     ),
   );
-  const rollback = (ordinal: number, restoreFiles?: boolean) =>
+  const rollback = (
+    ordinal: number,
+    restoreFiles?: boolean,
+    fromItemId?: TurnItemId,
+    keepLater?: boolean,
+    switchTo?: ModelSelection,
+  ) =>
     Effect.gen(function* () {
       const service = yield* CheckpointRollbackService.CheckpointRollbackServiceV2;
       yield* service.execute({
         threadId,
         providerThreadId,
+        ...(switchTo === undefined ? {} : { modelSelection: switchTo }),
         scopeId,
         checkpointId: checkpointId(ordinal),
         ...(restoreFiles === undefined ? {} : { restoreFiles }),
+        ...(fromItemId === undefined ? {} : { fromItemId }),
+        ...(keepLater === true ? { keepLater: true } : {}),
       });
     }).pipe(Effect.provide(serviceLayer));
 
   return {
     store,
     now,
+    apply,
     threadId,
+    providerThreadId,
+    providerThread,
+    modelSelection,
+    detached,
     runId,
     nodeId,
     checkpointId,
     rollback,
     rollbackCounts,
+    itemId,
+    cuts,
+    cutFrom,
     restored,
     deletedRefs,
     discardedRepositoryOrdinals,
@@ -1001,6 +1063,89 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
         }),
     );
 
+    it.effect("cuts the kept run at a step and hides what the provider dropped", () =>
+      Effect.gen(function* () {
+        const history = yield* seedRollbackHistory;
+        // The step that produced item 203 began with item 202.
+        history.cutFrom.ordinal = 202;
+
+        yield* history.rollback(2, false, history.itemId(203));
+
+        // Later runs go as in any rewind; files stay, whatever the caller asked.
+        assert.deepEqual(history.rollbackCounts, [4]);
+        assert.deepEqual(history.restored, []);
+        assert.deepEqual(
+          history.cuts.map((cut) => [cut?.item.ordinal, cut?.items.map((item) => item.ordinal)]),
+          [[203, [200, 201, 202, 203, 204]]],
+        );
+        assert.deepEqual(history.cuts[0]?.item.nativeItemId, "native-item-203");
+        // Read through the run's records: other tests leave rows a full projection cannot decode.
+        const visible = () =>
+          Effect.gen(function* () {
+            const cutRun = yield* history.store.getRun(history.threadId, history.runId(2));
+            const refs = yield* history.store.getRunItemRefs(history.threadId, history.runId(2));
+            return refs
+              .map((ref) => ref.ordinal)
+              .filter((ordinal) => !isOrchestrationV2RunItemTruncated(cutRun!, { ordinal }));
+          });
+        assert.deepEqual(yield* visible(), [200, 201]);
+        const run = yield* history.store.getRun(history.threadId, history.runId(2));
+        assert.equal(run?.status, "completed");
+        assert.deepEqual(
+          run?.truncations?.map((cut) => cut.fromOrdinal),
+          [202],
+        );
+
+        // A second cut sees only what the first left, and never takes the run's opening row.
+        history.cutFrom.ordinal = 0;
+        yield* history.rollback(2, false, history.itemId(201));
+        assert.deepEqual(
+          history.cuts[1]?.items.map((item) => item.ordinal),
+          [200, 201],
+        );
+        assert.deepEqual(yield* visible(), [200]);
+      }),
+    );
+
+    it.effect("takes one step out of a run and leaves the later runs alone", () =>
+      Effect.gen(function* () {
+        const history = yield* seedRollbackHistory;
+        // The step is items 202 and 203; item 204 belongs to the next one.
+        history.cutFrom.ordinal = 202;
+        history.cutFrom.next = 204;
+
+        yield* history.rollback(2, false, history.itemId(203), true);
+
+        assert.deepEqual(
+          history.cuts.map((cut) => [cut?.item.ordinal, cut?.only]),
+          [[203, true]],
+        );
+        // The store is shared with the tests above, which cut this run too: read the new cut.
+        const run = yield* history.store.getRun(history.threadId, history.runId(2));
+        const cut = run?.truncations?.at(-1);
+        assert.deepEqual([cut?.fromOrdinal, cut?.toOrdinal], [202, 204]);
+        assert.deepEqual(
+          [200, 201, 202, 203, 204].filter(
+            (ordinal) => !isOrchestrationV2RunItemTruncated({ truncations: [cut!] }, { ordinal }),
+          ),
+          [200, 201, 204],
+        );
+        // Nothing is rewound: no run is rolled back and no checkpoint goes stale.
+        assert.isFalse(history.committed.some((event) => event.type === "checkpoint.captured"));
+        assert.deepEqual(
+          history.committed.flatMap((event) =>
+            event.type === "run.updated" ? [[event.payload.id, event.payload.status]] : [],
+          ),
+          [[history.runId(2), "completed"]],
+        );
+        assert.deepEqual(history.deletedRefs, []);
+        const records = yield* history.store.getThreadRecords(history.threadId, [
+          "providerThreads",
+        ]);
+        assert.equal(records.providerThreads[0]?.lastRunOrdinal, 6);
+      }),
+    );
+
     it.effect("skips a pending rollback once the thread is deleted", () =>
       Effect.gen(function* () {
         const history = yield* seedRollbackHistory;
@@ -1019,6 +1164,67 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
         assert.deepEqual(history.rollbackCounts, []);
         assert.deepEqual(history.restored, []);
         assert.deepEqual(history.committed, []);
+      }),
+    );
+
+    it.effect("goes back to another agent's turn and makes that agent the thread's again", () =>
+      Effect.gen(function* () {
+        const history = yield* seedRollbackHistory;
+        // Runs 3 and 4 went to another agent, which is the thread's agent now.
+        const otherSelection = { instanceId: ProviderInstanceId.make("claude"), model: "opus" };
+        const other = {
+          ...history.providerThread,
+          id: ProviderThreadId.make("rollback-history-other"),
+          driver: ProviderDriverKind.make("claudeAgent"),
+          providerInstanceId: otherSelection.instanceId,
+          providerSessionId: ProviderSessionId.make("rollback-history-other-session"),
+          nativeThreadRef: {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            nativeId: "other-native",
+            strength: "strong" as const,
+          },
+          firstRunOrdinal: 3,
+          lastRunOrdinal: 4,
+        };
+        yield* history.apply({ type: "provider-thread.updated", payload: other });
+        const thread = yield* history.store.getThread(history.threadId);
+        yield* history.apply({
+          type: "thread.provider-switched",
+          payload: {
+            ...thread,
+            providerInstanceId: otherSelection.instanceId,
+            modelSelection: otherSelection,
+          },
+        });
+        for (const ordinal of [3, 4]) {
+          const run = yield* history.store.getRun(history.threadId, history.runId(ordinal));
+          yield* history.apply({
+            type: "run.updated",
+            runId: run!.id,
+            payload: { ...run!, providerThreadId: other.id },
+          });
+        }
+
+        yield* history.rollback(2, false, undefined, undefined, history.modelSelection);
+
+        const after = yield* history.store.getThread(history.threadId);
+        assert.equal(after.activeProviderThreadId, history.providerThreadId);
+        assert.deepEqual(after.modelSelection, history.modelSelection);
+        // The other agent's conversation still holds runs 3 and 4: it starts over when used again.
+        const records = yield* history.store.getThreadRecords(history.threadId, [
+          "providerThreads",
+          "runs",
+        ]);
+        const reset = records.providerThreads.find((candidate) => candidate.id === other.id);
+        assert.deepEqual(
+          [reset?.nativeThreadRef, reset?.providerSessionId, reset?.lastRunOrdinal],
+          [null, null, null],
+        );
+        assert.deepEqual(history.detached, [other.providerSessionId]);
+        assert.deepEqual(
+          records.runs.filter((run) => run.ordinal > 2).map((run) => run.status),
+          ["rolled_back", "rolled_back", "rolled_back", "rolled_back", "rolled_back"],
+        );
       }),
     );
   },

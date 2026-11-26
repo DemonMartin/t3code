@@ -95,6 +95,7 @@ import {
   userMessageFileLabel,
 } from "./TimelineUserMessageRow.logic";
 import { SharedTooltipTrigger } from "../ui/shared-tooltip";
+import { SteerRewindButton } from "./TimelineStepRewindButton";
 
 // Drawn inside the media so dark screenshots keep an edge on the dark background.
 const MEDIA_EDGE_CLASS_NAME =
@@ -373,6 +374,7 @@ function AutomationMessageRow({ row }: { row: Extract<TimelineRow, { kind: "mess
               {typeof revertTurnCount === "number" && (
                 <RevertUserMessageButton turnCount={revertTurnCount} messageId={row.message.id} />
               )}
+              <SteerRewindButton message={row.message} projectedItem={row.projectedItem} />
               <MessageCopyButton text={text} variant="ghost" />
               {promptLink !== null && (
                 <MessageCopyButton
@@ -874,6 +876,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
         {typeof revertTurnCount === "number" && (
           <RevertUserMessageButton turnCount={revertTurnCount} messageId={row.message.id} />
         )}
+        <SteerRewindButton message={row.message} projectedItem={row.projectedItem} />
         {copyText && (
           <MessageCopyButton
             text={contextClipboardFragment ? copyText : plainText}

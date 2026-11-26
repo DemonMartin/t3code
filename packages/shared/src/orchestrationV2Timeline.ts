@@ -1,16 +1,19 @@
-import type {
-  OrchestrationV2Run,
-  OrchestrationV2RunAttempt,
-  OrchestrationV2TurnItem,
-  OrchestrationV2UserMessageInputIntent,
+import {
+  isOrchestrationV2RunItemTruncated,
+  type OrchestrationV2Run,
+  type OrchestrationV2RunAttempt,
+  type OrchestrationV2TurnItem,
+  type OrchestrationV2UserMessageInputIntent,
 } from "@t3tools/contracts";
 
 type TimelineRun = Pick<OrchestrationV2Run, "id" | "status"> &
-  Partial<Pick<OrchestrationV2Run, "startedAt">>;
+  Partial<Pick<OrchestrationV2Run, "startedAt" | "truncations">>;
 type TimelineRunAttempt = Pick<OrchestrationV2RunAttempt, "runId" | "rootNodeId" | "status">;
-type TimelineTurnItem = Pick<OrchestrationV2TurnItem, "type" | "runId" | "nodeId"> & {
-  readonly inputIntent?: OrchestrationV2UserMessageInputIntent;
-};
+// Without an ordinal, a rewind into the item's run cannot hide it.
+type TimelineTurnItem = Pick<OrchestrationV2TurnItem, "type" | "runId" | "nodeId"> &
+  Partial<Pick<OrchestrationV2TurnItem, "ordinal">> & {
+    readonly inputIntent?: OrchestrationV2UserMessageInputIntent;
+  };
 
 function isOrchestrationV2SupersededInterrupt(input: {
   readonly item: TimelineTurnItem;
@@ -53,7 +56,13 @@ export function isOrchestrationV2TurnItemVisible(input: {
   const { item } = input;
   if (
     item.runId !== null &&
-    input.runs.some((run) => run.id === item.runId && run.status === "rolled_back")
+    input.runs.some(
+      (run) =>
+        run.id === item.runId &&
+        (run.status === "rolled_back" ||
+          (item.ordinal !== undefined &&
+            isOrchestrationV2RunItemTruncated(run, { ordinal: item.ordinal, type: item.type }))),
+    )
   ) {
     return false;
   }
@@ -82,9 +91,12 @@ export function createOrchestrationV2TurnItemVisibility(input: {
   readonly items: ReadonlyArray<TimelineTurnItem>;
 }): (item: TimelineTurnItem) => boolean {
   const statuses = new Map<TimelineRun["id"], TimelineRun["status"]>();
+  const truncated = new Map<TimelineRun["id"], TimelineRun>();
   for (const run of input.runs) {
     if (run.status === "rolled_back" || isHeldRun(run)) statuses.set(run.id, run.status);
     else statuses.delete(run.id);
+    if (run.truncations === undefined || run.truncations.length === 0) truncated.delete(run.id);
+    else truncated.set(run.id, run);
   }
   const supersededRoots = new Map<
     TimelineRunAttempt["runId"],
@@ -96,7 +108,7 @@ export function createOrchestrationV2TurnItemVisibility(input: {
     if (roots === undefined) supersededRoots.set(attempt.runId, (roots = new Set()));
     roots.add(attempt.rootNodeId);
   }
-  if (statuses.size === 0 && supersededRoots.size === 0) return () => true;
+  if (statuses.size === 0 && supersededRoots.size === 0 && truncated.size === 0) return () => true;
   const interruptRuns = new Set<TimelineTurnItem["runId"]>();
   if (supersededRoots.size > 0) {
     for (const item of input.items) {
@@ -106,6 +118,13 @@ export function createOrchestrationV2TurnItemVisibility(input: {
   return (item) => {
     const status = item.runId === null ? undefined : statuses.get(item.runId);
     if (status === "rolled_back") return false;
+    const cut = item.runId === null ? undefined : truncated.get(item.runId);
+    if (
+      cut !== undefined &&
+      item.ordinal !== undefined &&
+      isOrchestrationV2RunItemTruncated(cut, { ordinal: item.ordinal, type: item.type })
+    )
+      return false;
     if (
       (status === "queued" || status === "cancelled") &&
       item.type === "user_message" &&

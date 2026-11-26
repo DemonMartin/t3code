@@ -556,6 +556,13 @@ export const layerExecutor: Layer.Layer<
                 ...(effect.request.restoreFiles === undefined
                   ? {}
                   : { restoreFiles: effect.request.restoreFiles }),
+                ...(effect.request.fromItemId === undefined
+                  ? {}
+                  : { fromItemId: effect.request.fromItemId }),
+                ...(effect.request.keepLater === true ? { keepLater: true } : {}),
+                ...(effect.request.modelSelection === undefined
+                  ? {}
+                  : { modelSelection: effect.request.modelSelection }),
               })
               .pipe(
                 Effect.tapCause((cause) =>

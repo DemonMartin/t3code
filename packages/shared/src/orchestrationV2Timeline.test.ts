@@ -227,6 +227,73 @@ describe.each([
   });
 });
 
+describe("a rewind into a run", () => {
+  const run = {
+    id: runId,
+    status: "completed" as const,
+    truncations: [{ fromOrdinal: 5, at: "2026-11-26T10:00:00.000Z" }],
+  };
+  const rows = [3, 4, 5, 9].map((ordinal) => ({
+    type: "dynamic_tool" as const,
+    runId,
+    nodeId,
+    ordinal,
+  }));
+
+  it("hides the run's items from the cut on", () => {
+    const visible = createOrchestrationV2TurnItemVisibility({
+      runs: [run],
+      attempts: [],
+      items: rows,
+    });
+    expect(rows.filter(visible).map((row) => row.ordinal)).toEqual([3, 4]);
+    expect(
+      rows
+        .filter((item) =>
+          isOrchestrationV2TurnItemVisible({ item, runs: [run], attempts: [], items: rows }),
+        )
+        .map((row) => row.ordinal),
+    ).toEqual([3, 4]);
+  });
+
+  it("leaves other runs and rows without an ordinal alone", () => {
+    const visible = createOrchestrationV2TurnItemVisibility({
+      runs: [run],
+      attempts: [],
+      items: rows,
+    });
+    expect(
+      visible({ type: "dynamic_tool", runId: RunId.make("run:other"), nodeId, ordinal: 9 }),
+    ).toBe(true);
+    expect(visible({ type: "dynamic_tool", runId, nodeId })).toBe(true);
+  });
+});
+
+describe("a step cut out of a run", () => {
+  const run = {
+    id: runId,
+    status: "completed" as const,
+    truncations: [{ fromOrdinal: 4, toOrdinal: 7, at: "2026-11-26T10:00:00.000Z" }],
+  };
+  const row = (ordinal: number, type: "dynamic_tool" | "user_message" = "dynamic_tool") => ({
+    type,
+    runId,
+    nodeId,
+    ordinal,
+    ...(type === "user_message" ? { inputIntent: "steer" as const } : {}),
+  });
+
+  it("hides the step's rows, and neither what follows nor what the user sent meanwhile", () => {
+    const rows = [row(3), row(4), row(5, "user_message"), row(6), row(7), row(9)];
+    const visible = createOrchestrationV2TurnItemVisibility({
+      runs: [run],
+      attempts: [],
+      items: rows,
+    });
+    expect(rows.filter(visible).map((item) => item.ordinal)).toEqual([3, 5, 7, 9]);
+  });
+});
+
 describe("indexed timeline visibility", () => {
   it.each([
     ...[...ordinaryStatuses, "queued" as const].flatMap(

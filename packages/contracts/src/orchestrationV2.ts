@@ -312,6 +312,10 @@ export const OrchestrationV2ThreadCapabilities = Schema.Struct({
   canCreateEmptyThread: Schema.Boolean,
   canReadThreadSnapshot: Schema.Boolean,
   canRollbackThread: Schema.Boolean,
+  /** Rewinds to a step inside a turn, not only to a turn's start. */
+  canRollbackWithinTurn: Schema.optional(Schema.Boolean),
+  /** Takes one step out of a turn and keeps what came after it. */
+  canCutStep: Schema.optional(Schema.Boolean),
   canForkThread: Schema.Boolean,
   canForkFromTurn: Schema.Boolean,
   // Fork from a completed turn while a later turn in the source is still running.
@@ -819,6 +823,18 @@ export const OrchestrationV2RunOutput = Schema.Struct({
 });
 export type OrchestrationV2RunOutput = typeof OrchestrationV2RunOutput.Type;
 
+/**
+ * Items of a run that left the conversation at `at`: those from `fromOrdinal` on, after a rewind
+ * into the run. With `toOrdinal`, one step was cut out instead: its items stop before that
+ * ordinal, and a message the user sent meanwhile is not one of them.
+ */
+export const OrchestrationV2RunTruncation = Schema.Struct({
+  fromOrdinal: NonNegativeInt,
+  toOrdinal: Schema.optional(NonNegativeInt),
+  at: IsoDateTime,
+});
+export type OrchestrationV2RunTruncation = typeof OrchestrationV2RunTruncation.Type;
+
 export const OrchestrationV2Run = Schema.Struct({
   id: RunId,
   threadId: ThreadId,
@@ -865,8 +881,31 @@ export const OrchestrationV2Run = Schema.Struct({
    * the turn started, and their updates must not put an unanswered run back.
    */
   output: Schema.optional(OrchestrationV2RunOutput),
+  /** Written by a rewind into the run. A lifecycle write carries the run without them. */
+  truncations: Schema.optional(Schema.Array(OrchestrationV2RunTruncation)),
 });
 export type OrchestrationV2Run = typeof OrchestrationV2Run.Type;
+
+/**
+ * Whether a rewind into `run`, or a step cut out of it, took `item` out of the conversation. A
+ * fork shows the history it was made from, so it passes when it was created: later cuts leave
+ * it alone.
+ */
+export function isOrchestrationV2RunItemTruncated(
+  run: Pick<OrchestrationV2Run, "truncations">,
+  item: { readonly ordinal: number; readonly type?: string },
+  before?: DateTime.Utc,
+): boolean {
+  if (run.truncations === undefined) return false;
+  const limit = before === undefined ? undefined : DateTime.toEpochMillis(before);
+  return run.truncations.some(
+    (cut) =>
+      item.ordinal >= cut.fromOrdinal &&
+      (cut.toOrdinal === undefined ||
+        (item.ordinal < cut.toOrdinal && item.type !== "user_message")) &&
+      (limit === undefined || Date.parse(cut.at) < limit),
+  );
+}
 
 export const OrchestrationV2RunOutputSubmitted = Schema.Struct({
   runId: RunId,
@@ -3779,6 +3818,16 @@ export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback"),
     restoreFiles: Schema.optional(Schema.Boolean),
+    /**
+     * Also cuts the checkpoint's own run: the model step that produced this item, and all after
+     * it, leave the conversation. Files stay as they are, so `restoreFiles` must be false.
+     */
+    fromItemId: Schema.optional(TurnItemId),
+    /**
+     * With `fromItemId`: only that step leaves the conversation. Later steps and turns stay,
+     * so nothing is rolled back.
+     */
+    keepLater: Schema.optional(Schema.Boolean),
     commandId: CommandId,
     threadId: ThreadId,
     scopeId: CheckpointScopeId,
