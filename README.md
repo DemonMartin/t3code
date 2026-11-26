@@ -32,7 +32,10 @@ It works with Claude Code, Codex, Cursor, OpenCode, Grok Build, Antigravity, Kir
 
 ## About this fork
 
-The fork lets a plugin make its own environment the default place a chat runs: open a project, write a message, send, and the chat starts in a fresh sandbox, as cloud coding agents do. The changes are generic plugin-host features; the plugin that uses them is [DemonMartin/t3-sandboxes](https://github.com/DemonMartin/t3-sandboxes) (branch `agentbox`).
+The fork does two things.
+
+- **Sandboxes by default.** A plugin can make its own environment the default place a chat runs: open a project, write a message, send, and the chat starts in a fresh sandbox, as cloud coding agents do. The changes are generic plugin-host features; the plugin that uses them is [DemonMartin/t3-sandboxes](https://github.com/DemonMartin/t3-sandboxes) (branch `agentbox`).
+- **Control over what the agent has in its context.** A thread can be rewound to any step inside a turn, a single step can be cut out, a switch to another agent hands over much more of the thread, and the chat can be switched to show only what the current agent has.
 
 ### What changed
 
@@ -52,15 +55,38 @@ The fork lets a plugin make its own environment the default place a chat runs: o
 - Plugin-managed environments are not offered as "Run on", Auto balance, "Add to another machine" or provider-update targets. The update dialog names the installed and available version of each provider and no longer closes while its rows change.
 - A stopped managed environment shows a quiet starting status instead of a connection error.
 - The started thread opens once its messages are loaded, without an empty page in between.
-- A step inside a turn (a tool call, the agent's thinking, a reply) has "Rewind to here": the model response that produced it leaves the conversation with everything after it, and the next message continues from there. "Cut out" takes only that step and keeps what came after. Files stay as they are. OpenCode 2 and Claude support both; Codex can only revert whole turns.
-- When the thread's agent has less in its context than the thread shows (after a switch of agent, a cleared context or a compaction), the header has an "Agent's view" switch that shows only the rows the agent has.
+- A launcher that cannot take a first message with attachments refuses the send with its reason, instead of the send running on the host.
+
+**In a thread: what the agent has in its context**
+
+Upstream can go back to one of your own messages ("Edit from here"). The fork adds three things; the first two appear as icons when you hover a step (a tool call, the agent's thinking or a reply), the third in the header.
+
+| Action                                | What leaves the conversation                           | What stays                                                                                                    |
+| ------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| **Rewind to here** (clock)            | The step and everything after it, later turns included | Everything before it; your next message continues from there                                                  |
+| **Cut out** (scissors)                | Only that step                                         | Everything before and after it                                                                                |
+| **Agent's view** (eye, in the header) | Nothing: it only changes what the chat shows           | The chat shows just the steps the thread's current agent has in its context; click again for the whole thread |
+
+- A step is one model response: its thinking, text and tool calls with their results leave together. Hovering a tool call and rewinding or cutting therefore also takes the thinking that led to it.
+- Files are never changed by a rewind or a cut, because file snapshots exist per turn. To also restore files, use "Edit from here" on your message.
+- Supported by OpenCode 2 and Claude Code. Codex can only revert whole turns, so its steps show no icons; other agents likewise.
+- The eye appears only when the agent has less than the thread shows: after a switch of agent (a handoff can leave steps out and never carries the other agent's thinking), a cleared context, a restarted session or a compaction. A handed-over step counts as seen even where the handoff shortened it, and everything before a compaction is hidden although the agent keeps a summary of it.
+- No marker is shown where a turn was rewound or cut; the turn simply ends at, or continues past, the steps that remain.
 
 **In the server**
 
 - With `T3CODE_CODEX_EXTERNAL_SANDBOX=1`, Codex's read-only and workspace-write modes use its external-sandbox policy. Inside a container Codex's own sandbox cannot start; the container is the sandbox.
 - Launcher views may return `status` blocks.
-- A switch to another provider hands over more of the thread: 96 kB by default instead of 16 kB (`T3CODE_CONTEXT_HANDOFF_TOKEN_CAP`, up to 256 kB), with long items shortened instead of dropped, and with tool calls, searches and the todo list included.
-- OpenCode's own browser tools are denied in T3 sessions, so agents use T3's preview tools.
+- A switch to another agent hands over more of the thread: 96 kB by default instead of 16 kB (`T3CODE_CONTEXT_HANDOFF_TOKEN_CAP`, in bytes, up to 256 kB; small context windows still get less). A long item is shortened, keeping more of its end, instead of being dropped whole, and tool calls, searches and the todo list are handed over as well as messages and shell commands. The agent's thinking is never handed over.
+- OpenCode's own browser tools are denied in T3 sessions; they only attach inside OpenCode's desktop app, so agents use T3's preview tools instead.
+
+**For provider adapters**
+
+- `checkpoint.rollback` takes `fromItemId` (rewind to that step) and `keepLater` (cut only that step). The rollback target then carries a `cut` with the item and the run's items; the adapter answers with `cutFromOrdinal`, and for a cut of one step `cutToOrdinal`, so the timeline hides exactly what the provider dropped. A run records its cuts in `truncations`.
+- An adapter declares `threads.canRollbackWithinTurn` and `threads.canCutStep`; the provider status flag `supportsStepRollback` shows the icons.
+- OpenCode 2 reverts at the step's own message to rewind. It has no call that removes one message, so a cut exports the session, deletes it and imports it again under the same id without that message (its subagents' sessions, which a delete takes along, are put back after it); these are OpenCode's experimental export and import endpoints.
+- Claude rewinds by resuming from the transcript entry before the step. A cut edits the session's transcript file: the step's entries are removed and what hung off them is linked to the entry before.
+- A handoff sent to clients carries `deliveredItemIds`, the items the target agent was handed, which the agent's view reads.
 
 Mobile and desktop clients are unchanged; the features above are in the web client the server hosts.
 
