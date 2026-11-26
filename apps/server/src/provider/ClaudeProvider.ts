@@ -100,6 +100,7 @@ const CLAUDE_PRESENTATION = {
   displayName: "Claude",
   showInteractionModeToggle: true,
   reportsContextWindow: true,
+  supportsStepRollback: true,
 } as const;
 function toTitleCaseWords(value: string): string {
   const parts: Array<string> = [];

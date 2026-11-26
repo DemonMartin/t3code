@@ -24,6 +24,7 @@ import {
   type ProviderInteractionMode,
   type ProviderUserInputAnswers,
   type RunId,
+  type TurnItemId,
   type RuntimeMode,
   type RuntimeRequestId,
   type ThreadId,
@@ -244,6 +245,11 @@ export interface RevertThreadCheckpointInput extends ThreadCommandInput {
   readonly checkpointId?: string;
   readonly scopeId?: string;
   readonly turnCount?: number;
+  /**
+   * Also cuts the run the checkpoint follows: the model step that produced this item, and all
+   * after it, leave the conversation. Files stay as they are, so `restoreFiles` must be false.
+   */
+  readonly fromItemId?: TurnItemId;
 }
 
 export type StopThreadSessionInput = ThreadCommandInput;
@@ -1069,6 +1075,7 @@ export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThrea
       return yield* dispatch({
         type: "checkpoint.rollback",
         ...(input.restoreFiles === undefined ? {} : { restoreFiles: input.restoreFiles }),
+        ...(input.fromItemId === undefined ? {} : { fromItemId: input.fromItemId }),
         commandId: yield* allocateCommandId(input),
         threadId: input.threadId,
         scopeId: CheckpointScopeId.make(input.scopeId),
@@ -1107,6 +1114,7 @@ export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThrea
     return yield* dispatch({
       type: "checkpoint.rollback",
       ...(input.restoreFiles === undefined ? {} : { restoreFiles: input.restoreFiles }),
+      ...(input.fromItemId === undefined ? {} : { fromItemId: input.fromItemId }),
       commandId: yield* allocateCommandId(input),
       threadId: input.threadId,
       scopeId: checkpoint.scopeId,

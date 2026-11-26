@@ -67,6 +67,10 @@ export interface TimelineRowSharedState {
   runs: ReadonlyArray<HandoffTimelineRun>;
   activeThreadEnvironmentId: EnvironmentId;
   onRevertToTurnCount: (targetTurnCount: number, messageId: MessageId) => void;
+  /** Absent hides "Rewind to here" on steps: the agent cannot rewind into a turn. */
+  onRewindToStep:
+    | ((target: { readonly itemId: TurnItemId; readonly runId: RunId }) => void)
+    | undefined;
   onUseArtifactTemplate: (template: CodexArtifactTemplate) => void;
   onSendAppMessage: ((text: string) => Promise<void>) | undefined;
   onAppFullscreenChange: (rowId: string, fullscreen: boolean) => void;

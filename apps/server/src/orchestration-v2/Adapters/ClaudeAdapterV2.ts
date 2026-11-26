@@ -637,6 +637,7 @@ export const ClaudeProviderCapabilitiesV2 = {
     canCreateEmptyThread: true,
     canReadThreadSnapshot: false,
     canRollbackThread: true,
+    canRollbackWithinTurn: true,
     canForkThread: true,
     canForkFromTurn: true,
     canForkWhileSourceRunning: true,
@@ -947,6 +948,14 @@ export interface ClaudeAgentSdkQueryRunnerShape {
     ForkSessionResult & { readonly headMessageId?: string },
     ClaudeAgentSdkQueryRunnerError
   >;
+  /**
+   * A session's transcript entries, oldest first, wherever its project folder is now. A runner
+   * without it cannot rewind into a turn.
+   */
+  readonly sessionMessages?: (input: {
+    readonly sessionId: string;
+    readonly environment: NodeJS.ProcessEnv;
+  }) => Effect.Effect<ReadonlyArray<ClaudeHistoryMessage>, ClaudeAgentSdkQueryRunnerError>;
   readonly subagentLaunchToolUseId: (
     input: ClaudeAgentSdkSubagentLookupInput,
   ) => Effect.Effect<string | null, ClaudeAgentSdkQueryRunnerError>;
@@ -1425,16 +1434,81 @@ const decodeClaudeHistoryMessages = Schema.decodeUnknownEffect(
       Schema.Struct({
         type: Schema.String,
         uuid: Schema.String,
-        message: Schema.Struct({ content: Schema.Unknown, model: Schema.optional(Schema.Unknown) }),
+        message: Schema.Struct({
+          content: Schema.Unknown,
+          model: Schema.optional(Schema.Unknown),
+          id: Schema.optional(Schema.Unknown),
+        }),
       }),
     ),
   ),
 );
 
-interface ClaudeHistoryMessage {
+export interface ClaudeHistoryMessage {
   readonly type: string;
   readonly uuid: string;
-  readonly message: { readonly content: unknown; readonly model?: unknown };
+  readonly message: {
+    readonly content: unknown;
+    readonly model?: unknown;
+    /** The API response an assistant entry is a block of; its blocks share it. */
+    readonly id?: unknown;
+  };
+}
+
+/**
+ * Where a transcript is cut so the model step that produced an item leaves it, with all after
+ * it. `resumeSessionAt` is the last entry kept, null when the step opens the transcript.
+ * `ordinal` is the first item cut, which can sit before the one asked for: a step's thinking
+ * comes before its tool call. Null when the transcript holds none of the items from it on.
+ */
+export function claudeStepCut(
+  messages: ReadonlyArray<ClaudeHistoryMessage>,
+  cut: ProviderAdapter.ProviderAdapterV2TurnCut,
+  providerThreadId: OrchestrationV2ProviderThread["id"],
+): { readonly resumeSessionAt: string | null; readonly ordinal: number } | null {
+  // The native ids this adapter gives items: an entry's uuid, a tool call's id, and
+  // `${uuid or response id}:thinking:${n}` or `:text:${n}` for streamed blocks.
+  const entryOf = new Map<string, number>();
+  const note = (nativeId: unknown, index: number) => {
+    if (typeof nativeId === "string" && !entryOf.has(nativeId)) entryOf.set(nativeId, index);
+  };
+  messages.forEach((entry, index) => {
+    note(entry.uuid, index);
+    if (entry.type !== "assistant") return;
+    note(entry.message.id, index);
+    if (!Array.isArray(entry.message.content)) return;
+    for (const block of entry.message.content) {
+      if (field(block, "type") === "tool_use") note(field(block, "id"), index);
+    }
+  });
+  const indexOf = (nativeId: string | null) =>
+    nativeId === null
+      ? undefined
+      : (entryOf.get(nativeId) ?? entryOf.get(nativeId.replace(/:(?:thinking|text):\d+$/, "")));
+  // T3's own rows (notices, stop requests) are in no entry; the next agent item stands in.
+  for (const item of cut.items) {
+    if (
+      item.ordinal < cut.item.ordinal ||
+      (item.providerThreadId !== null && item.providerThreadId !== providerThreadId)
+    )
+      continue;
+    const found = indexOf(item.nativeItemId);
+    if (found === undefined) continue;
+    const response = messages[found]!.type === "assistant" ? messages[found]!.message.id : null;
+    const start =
+      typeof response === "string"
+        ? messages.findIndex((entry) => entry.type === "assistant" && entry.message.id === response)
+        : found;
+    const ordinals = cut.items.flatMap((candidate) => {
+      const index = indexOf(candidate.nativeItemId);
+      return index !== undefined && index >= start ? [candidate.ordinal] : [];
+    });
+    return {
+      resumeSessionAt: start === 0 ? null : messages[start - 1]!.uuid,
+      ordinal: Math.min(cut.item.ordinal, ...ordinals),
+    };
+  }
+  return null;
 }
 
 // The placeholder reply the CLI records for a failed request.
@@ -2294,6 +2368,19 @@ export const layerQueryRunner: Layer.Layer<
           : result.headMessageId;
         return headMessageId === undefined ? result : { ...result, headMessageId };
       }),
+      sessionMessages: Effect.fn("ClaudeAgentSdkQueryRunner.sessionMessages")(
+        function* (input: { readonly sessionId: string; readonly environment: NodeJS.ProcessEnv }) {
+          // In the worker: the SDK reads the Claude home from the process environment.
+          const transcript = yield* runClaudeWorker({ method: "getSessionMessages", ...input });
+          return yield* decodeClaudeHistoryMessages(transcript);
+        },
+        (effect) =>
+          effect.pipe(
+            Effect.mapError((cause) => queryRunnerError(cause, "getSessionMessages")),
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Effect.provideService(Path.Path, path),
+          ),
+      ),
       subagentLaunchToolUseId: Effect.fn("ClaudeAgentSdkQueryRunner.subagentLaunchToolUseId")(
         function* (input: ClaudeAgentSdkSubagentLookupInput) {
           const protocolLogger = makeClaudeAgentSdkProtocolLogger({
@@ -15424,6 +15511,78 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               // The rewound history may no longer hold the turns that carried app notes.
               deliveredAppContext.delete(nativeThreadId);
               const now = yield* DateTime.now;
+              const cut =
+                rollbackInput.target.type === "provider_turn"
+                  ? rollbackInput.target.cut
+                  : undefined;
+              if (cut !== undefined && queryRunner.sessionMessages === undefined) {
+                return yield* new ProviderAdapter.ProviderAdapterRollbackThreadError({
+                  driver: CLAUDE_PROVIDER,
+                  providerThreadId: rollbackInput.providerThread.id,
+                  cause: "This Claude runtime cannot read its transcript to rewind into a turn.",
+                });
+              }
+              const step =
+                cut === undefined || queryRunner.sessionMessages === undefined
+                  ? null
+                  : claudeStepCut(
+                      yield* queryRunner.sessionMessages({
+                        sessionId: nativeThreadId,
+                        environment: adapterOptions.environment,
+                      }),
+                      cut,
+                      rollbackInput.providerThread.id,
+                    );
+              if (step !== null) {
+                const cursor = step.resumeSessionAt;
+                if (cursor === null) {
+                  return yield* new ProviderAdapter.ProviderAdapterRollbackThreadError({
+                    driver: CLAUDE_PROVIDER,
+                    providerThreadId: rollbackInput.providerThread.id,
+                    cause:
+                      "Nothing precedes that step in Claude's transcript; rewind to the message instead.",
+                  });
+                }
+                // The cut turn, and any after it in the same run, now end at the cursor: a later
+                // rewind or fork to them must not bring the cut steps back.
+                const cutTurn =
+                  rollbackInput.providerThreadTurns.find(
+                    (turn) => turn.id === cut?.item.providerTurnId,
+                  ) ??
+                  (rollbackInput.target as { providerTurn: OrchestrationV2ProviderTurn })
+                    .providerTurn;
+                return {
+                  providerThread: {
+                    ...rollbackInput.providerThread,
+                    providerSessionId: input.providerSessionId,
+                    nativeConversationHeadRef: {
+                      driver: CLAUDE_PROVIDER,
+                      nativeId: cursor,
+                      strength: "weak" as const,
+                    },
+                    status: "idle" as const,
+                    lastRunOrdinal: rollbackInput.target.appRunOrdinal,
+                    updatedAt: now,
+                  },
+                  messages: [],
+                  runtimeRequests: [],
+                  cutFromOrdinal: step.ordinal,
+                  providerTurns: rollbackInput.providerThreadTurns
+                    .filter(
+                      (turn) =>
+                        turn.providerThreadId === rollbackInput.providerThread.id &&
+                        turn.ordinal >= cutTurn.ordinal,
+                    )
+                    .map((turn) => ({
+                      ...turn,
+                      nativeTurnRef: {
+                        driver: CLAUDE_PROVIDER,
+                        nativeId: cursor,
+                        strength: "weak" as const,
+                      },
+                    })),
+                };
+              }
               const resumeSessionAt = yield* resolveClaudeRollbackResumeSessionAt(rollbackInput);
 
               if (rollbackInput.target.type === "thread_start" && resumeSessionAt === null) {

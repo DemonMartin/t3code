@@ -1014,6 +1014,67 @@ export async function waitForRevertedMessage(
   });
 }
 
+/**
+ * Sends a rewind to a step inside run `runId` and waits for the server to cut the run there.
+ * `revert` gets the run's ordinal, which names the checkpoint the rewind follows.
+ */
+export async function waitForStepRewind(
+  threadRef: ScopedThreadRef,
+  runId: RunId,
+  requestId: CommandId,
+  revert: (turnCount: number) => Promise<void>,
+  timeoutMs = 120_000,
+): Promise<void> {
+  const threadAtom = environmentThreadDetails.stateAtom(threadRef);
+  const readProjection = () => Option.getOrNull(appAtomRegistry.get(threadAtom).data);
+  const run = readProjection()?.runs.find((candidate) => candidate.id === runId);
+  if (run === undefined || run.status === "rolled_back") {
+    throw new Error(m(msg("The thread has changed. Select a step to rewind again.")));
+  }
+  const cutsBefore = run.truncations?.length ?? 0;
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let accepted = false;
+    let unsubscribe = () => {};
+    let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      if (timeout !== undefined) globalThis.clearTimeout(timeout);
+      unsubscribe();
+      if (error === undefined) resolve();
+      else reject(error);
+    };
+    const inspect = () => {
+      const thread = readProjection();
+      if (!thread) return;
+      const failure = thread.thread.rollbackFailure;
+      if (failure?.requestId === requestId) {
+        finish(new Error(failure.message));
+        return;
+      }
+      if (
+        accepted &&
+        thread.runs.some(
+          (candidate) =>
+            candidate.id === runId && (candidate.truncations?.length ?? 0) > cutsBefore,
+        )
+      )
+        finish();
+    };
+    unsubscribe = appAtomRegistry.subscribe(threadAtom, inspect);
+    timeout = globalThis.setTimeout(() => {
+      finish(new Error(m(msg("Timed out waiting for the thread to rewind."))));
+    }, timeoutMs);
+    Promise.resolve()
+      .then(() => revert(run.ordinal))
+      .then(() => {
+        accepted = true;
+        inspect();
+      }, finish);
+  });
+}
+
 export interface LocalDispatchSnapshot {
   startedAt: string;
   preparingWorktree: boolean;

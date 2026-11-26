@@ -3,8 +3,10 @@ import type {
   EnvironmentId,
   MessageId,
   OrchestrationV2ThreadProjection,
+  RunId,
   ScopedThreadRef,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import { rewindFileRestore } from "@t3tools/client-runtime/state/thread-repositories";
 import { useAtomValue } from "@effect/atom-react";
@@ -202,6 +204,61 @@ interface PendingRevert {
 }
 
 const revertConfirmAtom = makeThreadOverlayAtom<PendingRevert>("revert-confirm");
+
+/** A step inside a turn the user asked to rewind to. */
+export interface PendingStepRewind {
+  readonly itemId: TurnItemId;
+  readonly runId: RunId;
+}
+
+const stepRewindConfirmAtom = makeThreadOverlayAtom<PendingStepRewind>("step-rewind-confirm");
+
+export function openStepRewindConfirm(threadKey: string, pending: PendingStepRewind): void {
+  appAtomRegistry.set(stepRewindConfirmAtom, { threadKey, value: pending });
+}
+
+export function StepRewindConfirmHost(props: {
+  readonly threadKey: string;
+  readonly onConfirm: (pending: PendingStepRewind) => void;
+}) {
+  const pending = useThreadOverlay(stepRewindConfirmAtom, props.threadKey);
+  return (
+    <AlertDialog
+      open={pending !== null}
+      onOpenChange={(open) => {
+        if (!open) closeThreadOverlay(stepRewindConfirmAtom);
+      }}
+    >
+      <AlertDialogPopup>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            <T>Rewind to here?</T>
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            <T>
+              The chat goes back to just before this step. The step and everything after it leave
+              the conversation, so your next message continues from there. Files stay as they are.
+            </T>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogClose render={<Button variant="outline" />}>
+            <T>Cancel</T>
+          </AlertDialogClose>
+          <Button
+            onClick={() => {
+              if (pending === null) return;
+              closeThreadOverlay(stepRewindConfirmAtom);
+              props.onConfirm(pending);
+            }}
+          >
+            <T>Rewind</T>
+          </Button>
+        </AlertDialogFooter>
+      </AlertDialogPopup>
+    </AlertDialog>
+  );
+}
 
 export function openRevertConfirm(threadKey: string, pending: PendingRevert): void {
   appAtomRegistry.set(revertConfirmAtom, { threadKey, value: pending });

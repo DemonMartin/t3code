@@ -23,6 +23,7 @@ import {
   legacyThreadPullRequestKey,
 } from "../sourceControl/threadPullRequests.ts";
 import {
+  isOrchestrationV2RunItemTruncated,
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type ChatAttachment,
   CommandId,
@@ -124,6 +125,7 @@ import * as ProjectStore from "./ProjectStore.ts";
 import * as TaskFolderStore from "../workspace/TaskFolderStore.ts";
 import {
   isCheckpointRestoreIsolated,
+  ROLLBACK_WITHIN_TURN_UNSUPPORTED_MESSAGE,
   SHARED_WORKSPACE_RESTORE_MESSAGE,
 } from "./CheckpointRestoreSafety.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
@@ -1932,11 +1934,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     projectionStore
       .getThreadRecords(
         threadId,
-        ["turnItems"],
+        ["turnItems", "runs"],
         runIds === undefined ? undefined : { turnItemRunIds: runIds },
       )
       .pipe(
-        Effect.map((records) => records.turnItems),
+        Effect.map((records) => {
+          // What a rewind into a run cut is no longer part of the conversation.
+          const cutRuns = new Map(
+            records.runs.flatMap((run) => (run.truncations === undefined ? [] : [[run.id, run]])),
+          );
+          if (cutRuns.size === 0) return records.turnItems;
+          return records.turnItems.filter((item) => {
+            const run = item.runId === null ? undefined : cutRuns.get(item.runId);
+            return run === undefined || !isOrchestrationV2RunItemTruncated(run, item.ordinal);
+          });
+        }),
         Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
       );
 
@@ -14929,6 +14941,43 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
 
       const targetOrdinal = targetCheckpoint.appRunOrdinal ?? 0;
+      if (command.fromItemId !== undefined) {
+        const refuse = (cause: string) =>
+          new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause,
+          });
+        if (command.restoreFiles !== false) {
+          return yield* refuse("A rewind into a turn leaves files as they are.");
+        }
+        if (capabilities.threads.canRollbackWithinTurn !== true) {
+          return yield* refuse(ROLLBACK_WITHIN_TURN_UNSUPPORTED_MESSAGE);
+        }
+        const item = yield* projectionStore
+          .getTurnItemRef(command.threadId, command.fromItemId)
+          .pipe(Effect.mapError((cause) => refuse(String(cause))));
+        const itemRun =
+          item === undefined ? undefined : projection.runs.find((run) => run.id === item.runId);
+        if (item === undefined || itemRun === undefined || itemRun.ordinal !== targetOrdinal) {
+          return yield* refuse(
+            `Turn item ${command.fromItemId} is not part of the run checkpoint ${targetCheckpoint.id} follows.`,
+          );
+        }
+        if (item.providerThreadId !== null && item.providerThreadId !== providerThread.id) {
+          return yield* refuse(
+            `Turn item ${command.fromItemId} belongs to another agent's conversation.`,
+          );
+        }
+        if (
+          itemRun.status !== "completed" &&
+          itemRun.status !== "interrupted" &&
+          itemRun.status !== "failed" &&
+          itemRun.status !== "cancelled"
+        ) {
+          return yield* refuse(`Run ${itemRun.id} is ${itemRun.status}; stop it before rewinding.`);
+        }
+      }
       if (targetOrdinal > 0) {
         const targetRun = projection.runs.find((run) => run.ordinal === targetOrdinal);
         const targetProviderTurn =
@@ -14993,6 +15042,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           request: {
             type: "provider-thread.rollback",
             ...(command.restoreFiles === undefined ? {} : { restoreFiles: command.restoreFiles }),
+            ...(command.fromItemId === undefined ? {} : { fromItemId: command.fromItemId }),
             providerThreadId: providerThread.id,
             checkpointId: targetCheckpoint.id,
             scopeId: targetScope.id,

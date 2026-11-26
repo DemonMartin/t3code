@@ -2,11 +2,13 @@ import {
   CheckpointId,
   CheckpointScopeId,
   type CommandId,
+  isOrchestrationV2RunItemTruncated,
   latestProviderTurnForAttempt,
   type OrchestrationV2DomainEvent,
   ProviderThreadId,
   repositoryRewindCheckpoint,
   ThreadId,
+  type TurnItemId,
   VcsProcessExitError,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -105,6 +107,11 @@ export interface CheckpointRollbackServiceV2Shape {
     readonly restoreFiles?: boolean;
     /** The rewind command: names the request when repositories are reported as left unrestored. */
     readonly requestId?: CommandId;
+    /**
+     * Also cuts the checkpoint's run short: the model step that produced this item, and all after
+     * it, leave the conversation. Files stay as they are.
+     */
+    readonly fromItemId?: TurnItemId;
   }) => Effect.Effect<void, CheckpointRollbackExecutionError>;
 }
 
@@ -154,12 +161,14 @@ export const layer: Layer.Layer<
       readonly scopeId: CheckpointScopeId;
       readonly restoreFiles?: boolean;
       readonly requestId?: CommandId;
+      readonly fromItemId?: TurnItemId;
     }) {
       const context = yield* projections.getCheckpointRollbackContext(input.threadId, input);
       if (context.thread.deletedAt !== null) return;
       const { providerThread, checkpoint, scope, targetAttempt, runsToRollback, staleCheckpoints } =
         context;
-      const restoreFiles = input.restoreFiles !== false;
+      // A cut leaves files alone: snapshots exist per run, not per step.
+      const restoreFiles = input.restoreFiles !== false && input.fromItemId === undefined;
       const { worktreePath, branch } = context.thread;
       const taskFolder = worktreePath === null ? null : yield* taskFolders.find(worktreePath);
       // A linked project folder is not a repository: it has no snapshot, by design.
@@ -239,6 +248,30 @@ export const layer: Layer.Layer<
                 providerTurn: targetTurn,
                 ...(message === undefined ? {} : { message }),
               };
+            });
+
+      const cut =
+        input.fromItemId === undefined
+          ? undefined
+          : yield* Effect.gen(function* () {
+              const item = yield* projections.getTurnItemRef(input.threadId, input.fromItemId!);
+              const run =
+                item === undefined || item.runId === null
+                  ? undefined
+                  : yield* projections.getRun(input.threadId, item.runId);
+              if (
+                item === undefined ||
+                run === undefined ||
+                run.ordinal !== targetOrdinal ||
+                run.status === "rolled_back"
+              ) {
+                return yield* invalidTarget();
+              }
+              // Earlier cuts already took their items out of the provider's history.
+              const items = (yield* projections.getRunItemRefs(input.threadId, run.id)).filter(
+                (candidate) => !isOrchestrationV2RunItemTruncated(run, candidate.ordinal),
+              );
+              return { run, item, items };
             });
 
       const isolated = isCheckpointRestoreIsolated(context.thread, scope, taskFolder, {
@@ -421,12 +454,18 @@ export const layer: Layer.Layer<
           (turn.runAttemptId === null || !rolledBackAttemptIds.has(turn.runAttemptId)),
       );
 
-      const snapshot =
-        runsToRollback.length === 0
+      const snapshot: Pick<
+        ProviderAdapter.ProviderAdapterV2ThreadSnapshot,
+        "providerThread" | "cutFromOrdinal" | "providerTurns"
+      > =
+        runsToRollback.length === 0 && cut === undefined
           ? { providerThread }
           : yield* session.rollbackThread({
               providerThread,
-              target: rollbackTarget,
+              target:
+                cut === undefined || rollbackTarget.type !== "provider_turn"
+                  ? rollbackTarget
+                  : { ...rollbackTarget, cut: { item: cut.item, items: cut.items } },
               providerThreadTurns,
             });
       if (restoreFiles) {
@@ -503,6 +542,43 @@ export const layer: Layer.Layer<
                 providerInstanceId: providerThread.providerInstanceId,
                 occurredAt: now,
                 payload: { ...staleCheckpoint, status: "stale" },
+              }),
+            );
+          }
+          for (const providerTurn of snapshot.providerTurns ?? []) {
+            events.push(
+              yield* makeEvent({
+                type: "provider-turn.updated",
+                threadId: input.threadId,
+                driver: providerThread.driver,
+                providerInstanceId: providerThread.providerInstanceId,
+                occurredAt: now,
+                payload: providerTurn,
+              }),
+            );
+          }
+          if (cut !== undefined) {
+            // The turn's opening message stays: a step is never the user's own input.
+            const opening = cut.items[0]?.ordinal ?? cut.item.ordinal;
+            const fromOrdinal = Math.max(
+              Math.min(snapshot.cutFromOrdinal ?? cut.item.ordinal, cut.item.ordinal),
+              opening + 1,
+            );
+            events.push(
+              yield* makeEvent({
+                type: "run.updated",
+                threadId: input.threadId,
+                runId: cut.run.id,
+                ...(cut.run.rootNodeId === null ? {} : { nodeId: cut.run.rootNodeId }),
+                providerInstanceId: cut.run.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...cut.run,
+                  truncations: [
+                    ...(cut.run.truncations ?? []),
+                    { fromOrdinal, at: DateTime.formatIso(now) },
+                  ],
+                },
               }),
             );
           }

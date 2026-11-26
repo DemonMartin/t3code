@@ -11,6 +11,7 @@ import {
   type EnvironmentId,
   type MessageId,
   type ScopedThreadRef,
+  CommandId,
   type ThreadId,
   type RunId,
 } from "@t3tools/contracts";
@@ -23,19 +24,23 @@ import {
 import { readLocalApi } from "../../localApi";
 import { findRevertCheckpoint } from "../../session-logic";
 import { type ChatMessage } from "../../types";
-import { newThreadId } from "~/lib/utils";
+import { newThreadId, randomUUID } from "~/lib/utils";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { useComposerDraftStore } from "../../composerDraftStore";
 import { threadEnvironment } from "../../state/threads";
 import { waitForThreadShell } from "../../state/entities";
-import { openRevertConfirm } from "./ChatOverlayHosts";
+import {
+  openRevertConfirm,
+  openStepRewindConfirm,
+  type PendingStepRewind,
+} from "./ChatOverlayHosts";
 import { assetEnvironment } from "../../state/assets";
 import { readEnvironmentScope } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import { rewindToMessage } from "./chatViewSend";
-import { makeThreadErrorSetter } from "../ChatView.logic";
+import { makeThreadErrorSetter, waitForStepRewind } from "../ChatView.logic";
 interface TimelineRewindInput {
   readonly environmentId: EnvironmentId;
   readonly routeThreadRef: ScopedThreadRef;
@@ -58,7 +63,7 @@ interface TimelineRewindInput {
 
 /**
  * Going back in a thread's timeline: reverting to an earlier turn (restoring that message into
- * the composer) and forking a new thread from a run.
+ * the composer), rewinding to a step inside a turn, and forking a new thread from a run.
  */
 export function useTimelineRewind(input: TimelineRewindInput) {
   const {
@@ -185,6 +190,85 @@ export function useTimelineRewind(input: TimelineRewindInput) {
   };
   const onConfirmRevertStable = useStableCallback(onConfirmRevert);
 
+  const onRewindToStep = async (target: PendingStepRewind, confirmed = false) => {
+    if (
+      !activeThread ||
+      isRevertingCheckpoint ||
+      !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)
+    )
+      return;
+    if (activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel) {
+      setThreadError(
+        activeThread.id,
+        m(
+          msg("Reconnect {environment} before rewinding.", {
+            environment: activeEnvironmentUnavailableLabel,
+          }),
+        ),
+      );
+      return;
+    }
+    if (phase === "running" || isSendBusy) {
+      setThreadError(activeThread.id, m(msg("Interrupt the current turn before rewinding.")));
+      return;
+    }
+    if (!confirmed) {
+      openStepRewindConfirm(routeThreadKey, target);
+      return;
+    }
+    useComposerDraftStore.setState((store) => ({
+      rewindingThreadKeys: new Set(store.rewindingThreadKeys).add(routeThreadKey),
+    }));
+    setThreadError(activeThread.id, null);
+    const commandId = CommandId.make(randomUUID());
+    const failure = await waitForStepRewind(
+      routeThreadRef,
+      target.runId,
+      commandId,
+      async (turnCount) => {
+        // Keep the live checkpoint identity when command context refetches a bounded window.
+        const checkpoint = findRevertCheckpoint(serverProjection, turnCount);
+        const result = await revertThreadCheckpoint({
+          environmentId,
+          input: {
+            commandId,
+            threadId: activeThread.id,
+            turnCount,
+            restoreFiles: false,
+            fromItemId: target.itemId,
+            ...(checkpoint === undefined
+              ? {}
+              : { checkpointId: checkpoint.id, scopeId: checkpoint.scopeId }),
+          },
+        });
+        if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+      },
+    ).then(
+      () => null,
+      (error: unknown) =>
+        thrownErrorMessage(error, m) ?? m(msg("Failed to rewind the conversation.")),
+    );
+    useComposerDraftStore.setState((store) => {
+      const remaining = new Set(store.rewindingThreadKeys);
+      remaining.delete(routeThreadKey);
+      return { rewindingThreadKeys: remaining };
+    });
+    if (failure !== null) {
+      setThreadError(activeThread.id, failure);
+      return;
+    }
+    // The next message continues from the step, so the composer is where the user goes next.
+    requestAnimationFrame(() => {
+      if (currentRouteThreadKeyRef.current === routeThreadKey) composerRef.current?.focusAtEnd();
+    });
+  };
+  const onRewindToStepStable = useStableCallback((target: PendingStepRewind) => {
+    void onRewindToStep(target);
+  });
+  const onConfirmStepRewindStable = useStableCallback((target: PendingStepRewind) => {
+    void onRewindToStep(target, true);
+  });
+
   const onForkFromRun = async (input: {
     readonly sourceThreadId: ThreadId;
     readonly runId: RunId;
@@ -235,7 +319,9 @@ export function useTimelineRewind(input: TimelineRewindInput) {
   const onRevertTimelineTurnStable = useStableCallback(onRevertTimelineTurn);
   return {
     onConfirmRevertStable,
+    onConfirmStepRewindStable,
     onForkFromRunStable,
     onRevertTimelineTurnStable,
+    onRewindToStepStable,
   };
 }

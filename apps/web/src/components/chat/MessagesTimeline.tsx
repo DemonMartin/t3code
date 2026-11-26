@@ -22,6 +22,7 @@ import {
   type ServerProviderSkill,
   type RunId,
   ThreadId,
+  type TurnItemId,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import { resolveWorkGroupScrollAnchor } from "@t3tools/client-runtime/work-log/scroll-anchor";
@@ -312,6 +313,8 @@ interface MessagesTimelineProps {
   threadStartCheckpointAvailable?: boolean;
   availableRevertTurnCounts?: ReadonlySet<number> | undefined;
   onRevertToTurnCount: (targetTurnCount: number, messageId: MessageId) => void;
+  /** Absent when the agent cannot rewind into a turn; steps then show no rewind action. */
+  onRewindToStep?: (target: { readonly itemId: TurnItemId; readonly runId: RunId }) => void;
   onUseArtifactTemplate?: (template: CodexArtifactTemplate) => void;
   onSendAppMessage?: (text: string) => Promise<void>;
   onRunShellCommand?: (command: string) => void;
@@ -415,6 +418,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   threadStartCheckpointAvailable = false,
   availableRevertTurnCounts,
   onRevertToTurnCount,
+  onRewindToStep,
   onUseArtifactTemplate = NOOP_USE_ARTIFACT_TEMPLATE,
   onSendAppMessage,
   onRunShellCommand,
@@ -1142,6 +1146,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     runs,
     activeThreadEnvironmentId,
     onRevertToTurnCount,
+    onRewindToStep,
     onRunShellCommand,
     findActive,
     onImageExpand,

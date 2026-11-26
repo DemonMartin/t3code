@@ -41,6 +41,7 @@ import { McpSignInAction } from "./McpSignInAction";
 import * as DateTime from "effect/DateTime";
 import { ChevronRightIcon, CircleAlertIcon, XIcon, RotateCcwIcon } from "lucide-react";
 import { Button, InlineButton } from "../ui/button";
+import { TimelineStepRewindButton } from "./TimelineStepRewindButton";
 import { useAssetUrls } from "../../assets/assetUrls";
 import { observeResize } from "../../lib/observeResize";
 import { useThreadShell } from "../../state/entities";
@@ -634,6 +635,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
               timestampFormat={timestampFormat}
             />
           ) : null}
+          <TimelineStepRewindButton projectedItem={workEntry.projectedItem} placement="row" />
           {createdThread ? (
             <button
               type="button"

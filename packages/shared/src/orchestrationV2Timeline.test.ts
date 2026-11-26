@@ -227,6 +227,48 @@ describe.each([
   });
 });
 
+describe("a rewind into a run", () => {
+  const run = {
+    id: runId,
+    status: "completed" as const,
+    truncations: [{ fromOrdinal: 5, at: "2026-11-26T10:00:00.000Z" }],
+  };
+  const rows = [3, 4, 5, 9].map((ordinal) => ({
+    type: "dynamic_tool" as const,
+    runId,
+    nodeId,
+    ordinal,
+  }));
+
+  it("hides the run's items from the cut on", () => {
+    const visible = createOrchestrationV2TurnItemVisibility({
+      runs: [run],
+      attempts: [],
+      items: rows,
+    });
+    expect(rows.filter(visible).map((row) => row.ordinal)).toEqual([3, 4]);
+    expect(
+      rows
+        .filter((item) =>
+          isOrchestrationV2TurnItemVisible({ item, runs: [run], attempts: [], items: rows }),
+        )
+        .map((row) => row.ordinal),
+    ).toEqual([3, 4]);
+  });
+
+  it("leaves other runs and rows without an ordinal alone", () => {
+    const visible = createOrchestrationV2TurnItemVisibility({
+      runs: [run],
+      attempts: [],
+      items: rows,
+    });
+    expect(
+      visible({ type: "dynamic_tool", runId: RunId.make("run:other"), nodeId, ordinal: 9 }),
+    ).toBe(true);
+    expect(visible({ type: "dynamic_tool", runId, nodeId })).toBe(true);
+  });
+});
+
 describe("indexed timeline visibility", () => {
   it.each([
     ...[...ordinaryStatuses, "queued" as const].flatMap(

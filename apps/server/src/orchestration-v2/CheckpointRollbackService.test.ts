@@ -4,6 +4,7 @@ import {
   CheckpointId,
   CheckpointRef,
   EventId,
+  isOrchestrationV2RunItemTruncated,
   MessageId,
   NodeId,
   type OrchestrationV2DomainEvent,
@@ -17,6 +18,7 @@ import {
   ProviderSessionId,
   ProviderThreadId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
@@ -792,7 +794,37 @@ const seedRollbackHistory = Effect.gen(function* () {
     });
   }
 
+  // Run 2's rows: the one that opens it, then four things the agent did.
+  const itemId = (ordinal: number) => TurnItemId.make(`rollback-history-item-${ordinal}`);
+  for (const ordinal of [200, 201, 202, 203, 204]) {
+    yield* apply({
+      type: "turn-item.updated",
+      payload: {
+        id: itemId(ordinal),
+        threadId,
+        runId: runId(2),
+        nodeId: nodeId(2),
+        providerThreadId,
+        providerTurnId: turnId(2),
+        nativeItemRef: { driver, nativeId: `native-item-${ordinal}`, strength: "strong" },
+        parentItemId: null,
+        ordinal,
+        status: "completed",
+        title: null,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        type: "reasoning",
+        text: `step ${ordinal}`,
+        streaming: false,
+      },
+    });
+  }
+
   const rollbackCounts: number[] = [];
+  const cuts: Array<ProviderAdapter.ProviderAdapterV2TurnCut | undefined> = [];
+  /** What the provider reports as the first item it cut; absent leaves the item asked for. */
+  const cutFrom: { ordinal?: number } = {};
   const restored: CheckpointId[] = [];
   const deletedRefs: CheckpointId[] = [];
   const discardedRepositoryOrdinals: number[] = [];
@@ -840,7 +872,11 @@ const seedRollbackHistory = Effect.gen(function* () {
               rollbackThread: (input: ProviderAdapter.ProviderAdapterV2RollbackThreadInput) =>
                 Effect.gen(function* () {
                   rollbackCounts.push(yield* resolveCodexRollbackTurnCount(input));
-                  return { providerThread: input.providerThread };
+                  if (input.target.type === "provider_turn") cuts.push(input.target.cut);
+                  return {
+                    providerThread: input.providerThread,
+                    ...(cutFrom.ordinal === undefined ? {} : { cutFromOrdinal: cutFrom.ordinal }),
+                  };
                 }),
             } as never),
         }),
@@ -848,7 +884,7 @@ const seedRollbackHistory = Effect.gen(function* () {
       ),
     ),
   );
-  const rollback = (ordinal: number, restoreFiles?: boolean) =>
+  const rollback = (ordinal: number, restoreFiles?: boolean, fromItemId?: TurnItemId) =>
     Effect.gen(function* () {
       const service = yield* CheckpointRollbackService.CheckpointRollbackServiceV2;
       yield* service.execute({
@@ -857,6 +893,7 @@ const seedRollbackHistory = Effect.gen(function* () {
         scopeId,
         checkpointId: checkpointId(ordinal),
         ...(restoreFiles === undefined ? {} : { restoreFiles }),
+        ...(fromItemId === undefined ? {} : { fromItemId }),
       });
     }).pipe(Effect.provide(serviceLayer));
 
@@ -869,6 +906,9 @@ const seedRollbackHistory = Effect.gen(function* () {
     checkpointId,
     rollback,
     rollbackCounts,
+    itemId,
+    cuts,
+    cutFrom,
     restored,
     deletedRefs,
     discardedRepositoryOrdinals,
@@ -999,6 +1039,50 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
             [history.checkpointId(0), history.checkpointId(8)],
           );
         }),
+    );
+
+    it.effect("cuts the kept run at a step and hides what the provider dropped", () =>
+      Effect.gen(function* () {
+        const history = yield* seedRollbackHistory;
+        // The step that produced item 203 began with item 202.
+        history.cutFrom.ordinal = 202;
+
+        yield* history.rollback(2, false, history.itemId(203));
+
+        // Later runs go as in any rewind; files stay, whatever the caller asked.
+        assert.deepEqual(history.rollbackCounts, [4]);
+        assert.deepEqual(history.restored, []);
+        assert.deepEqual(
+          history.cuts.map((cut) => [cut?.item.ordinal, cut?.items.map((item) => item.ordinal)]),
+          [[203, [200, 201, 202, 203, 204]]],
+        );
+        assert.deepEqual(history.cuts[0]?.item.nativeItemId, "native-item-203");
+        // Read through the run's records: other tests leave rows a full projection cannot decode.
+        const visible = () =>
+          Effect.gen(function* () {
+            const cutRun = yield* history.store.getRun(history.threadId, history.runId(2));
+            const refs = yield* history.store.getRunItemRefs(history.threadId, history.runId(2));
+            return refs
+              .map((ref) => ref.ordinal)
+              .filter((ordinal) => !isOrchestrationV2RunItemTruncated(cutRun!, ordinal));
+          });
+        assert.deepEqual(yield* visible(), [200, 201]);
+        const run = yield* history.store.getRun(history.threadId, history.runId(2));
+        assert.equal(run?.status, "completed");
+        assert.deepEqual(
+          run?.truncations?.map((cut) => cut.fromOrdinal),
+          [202],
+        );
+
+        // A second cut sees only what the first left, and never takes the run's opening row.
+        history.cutFrom.ordinal = 0;
+        yield* history.rollback(2, false, history.itemId(201));
+        assert.deepEqual(
+          history.cuts[1]?.items.map((item) => item.ordinal),
+          [200, 201],
+        );
+        assert.deepEqual(yield* visible(), [200]);
+      }),
     );
 
     it.effect("skips a pending rollback once the thread is deleted", () =>

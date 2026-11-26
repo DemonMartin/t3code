@@ -50,10 +50,12 @@ import {
   type ProviderReplayTranscript,
   type ProviderApprovalDecision,
   ProviderSessionId,
+  ProviderThreadId,
   ProviderTurnId,
   RunAttemptId,
   RunId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import { mcpAppFromToolItem } from "@t3tools/shared/toolOutput";
 import { assert, describe, it } from "@effect/vitest";
@@ -350,6 +352,82 @@ describe("ClaudeAdapterV2 native resume history", () => {
     },
   ])("selects the native history head for $name", ({ messages, head }) => {
     assert.equal(ClaudeAdapterV2.claudeResumeSessionAt(messages), head);
+  });
+
+  describe("a cut at a step", () => {
+    const providerThreadId = ProviderThreadId.make("provider-thread:cut");
+    const block = (uuid: string, response: string, content: unknown) => ({
+      uuid,
+      type: "assistant",
+      message: { id: response, content: [content] },
+    });
+    const result = (uuid: string, toolUseId: string) => ({
+      uuid,
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: toolUseId, content: "ok" }] },
+    });
+    const transcript = [
+      { uuid: "prompt", type: "user", message: { content: "go" } },
+      block("think-1", "response-1", { type: "thinking", thinking: "first" }),
+      block("call-1", "response-1", { type: "tool_use", id: "tool-1", name: "Bash", input: {} }),
+      result("result-1", "tool-1"),
+      block("think-2", "response-2", { type: "thinking", thinking: "second" }),
+      block("call-2", "response-2", { type: "tool_use", id: "tool-2", name: "Bash", input: {} }),
+      result("result-2", "tool-2"),
+      block("reply", "response-3", { type: "text", text: "done" }),
+    ];
+    const item = (
+      ordinal: number,
+      nativeItemId: string | null,
+      thread: typeof providerThreadId | null = providerThreadId,
+    ) => ({
+      id: TurnItemId.make(`item:${ordinal}`),
+      ordinal,
+      type: "dynamic_tool" as const,
+      providerThreadId: thread,
+      providerTurnId: null,
+      nativeItemId,
+    });
+    const items = [
+      item(1, "think-1:thinking:0"),
+      item(2, "tool-1"),
+      item(3, "response-2:thinking:0"),
+      item(4, "tool-2"),
+      item(5, null, null),
+      item(6, "reply"),
+    ];
+    const cutAt = (ordinal: number) =>
+      ClaudeAdapterV2.claudeStepCut(
+        transcript,
+        { item: items.find((candidate) => candidate.ordinal === ordinal)!, items },
+        providerThreadId,
+      );
+
+    it("drops the whole response a tool call came in, thinking included", () => {
+      assert.deepEqual(cutAt(4), { resumeSessionAt: "result-1", ordinal: 3 });
+    });
+
+    it("keeps the user's prompt when the first step is cut", () => {
+      assert.deepEqual(cutAt(2), { resumeSessionAt: "prompt", ordinal: 1 });
+    });
+
+    it("cuts at streamed thinking by the response it belongs to", () => {
+      assert.deepEqual(cutAt(3), { resumeSessionAt: "result-1", ordinal: 3 });
+    });
+
+    it("uses the next agent item for a row the transcript does not hold", () => {
+      assert.deepEqual(cutAt(5), { resumeSessionAt: "result-2", ordinal: 5 });
+    });
+
+    it("finds nothing once the transcript holds none of the items", () => {
+      assert.isNull(
+        ClaudeAdapterV2.claudeStepCut(
+          transcript.slice(0, 4),
+          { item: items[5]!, items },
+          providerThreadId,
+        ),
+      );
+    });
   });
 
   it("recognizes history that ends on a failed request", () => {

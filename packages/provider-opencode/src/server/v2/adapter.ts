@@ -143,6 +143,7 @@ const OpenCode2ProviderCapabilities = {
     canCreateEmptyThread: true,
     canReadThreadSnapshot: true,
     canRollbackThread: true,
+    canRollbackWithinTurn: true,
     canForkThread: true,
     canForkFromTurn: true,
     canForkFromSubagentThread: false,
@@ -4328,6 +4329,50 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       );
     });
 
+    // A step is one assistant message: its reasoning, text and tool calls. Null when the history
+    // holds none of the items, which is how a cut that already ran looks.
+    const stepBoundary = Effect.fnUntraced(function* (
+      sessionId: string,
+      providerThreadId: OrchestrationV2ProviderThread["id"],
+      cut: ProviderAdapter.ProviderAdapterV2TurnCut,
+    ) {
+      const history = yield* OpenCode2Client.paginate(
+        { sessionID: Session.ID.make(sessionId), order: "asc" as const, limit: 100 },
+        client.message.list,
+      ).pipe(Stream.runCollect);
+      // The native ids this adapter gives a message's items; see `itemBase` and `ordinalOf`.
+      const itemsOf = (message: (typeof history)[number]) => {
+        if (message.type !== "assistant") return [message.id];
+        const counts = { text: 0, reasoning: 0 };
+        return message.content.map((part) =>
+          part.type === "tool" ? part.id : `${message.id}:${part.type}:${counts[part.type]++}`,
+        );
+      };
+      const messageOf = new Map<string, (typeof history)[number]>();
+      for (const message of history) {
+        for (const nativeId of itemsOf(message)) messageOf.set(nativeId, message);
+      }
+      // T3's own rows (notices, stop requests) have no message; the next agent item stands in.
+      for (const item of cut.items) {
+        if (
+          item.ordinal < cut.item.ordinal ||
+          item.nativeItemId === null ||
+          (item.providerThreadId !== null && item.providerThreadId !== providerThreadId)
+        )
+          continue;
+        const message = messageOf.get(item.nativeItemId);
+        if (message === undefined) continue;
+        const step = new Set(itemsOf(message));
+        const ordinals = cut.items.flatMap((candidate) =>
+          candidate.nativeItemId !== null && step.has(candidate.nativeItemId)
+            ? [candidate.ordinal]
+            : [],
+        );
+        return { messageId: message.id, ordinal: Math.min(cut.item.ordinal, ...ordinals) };
+      }
+      return null;
+    });
+
     // Rollback must validate full history before native mutation; forks only need prompts.
     const userMessages = (sessionId: string, types?: ReadonlyArray<"user" | "synthetic">) =>
       Stream.fromIterable(types ?? [undefined]).pipe(
@@ -5527,6 +5572,16 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           if (!threads.has(sessionId)) {
             yield* runtime.resumeThread({ providerThread });
             yield* ensureQuiet(sessionId, "roll back");
+          }
+          const cut = target.type === "provider_turn" ? target.cut : undefined;
+          if (cut !== undefined) {
+            // The step's message sits before every later turn's prompt, so one revert cuts both.
+            const step = yield* stepBoundary(sessionId, providerThread.id, cut);
+            if (step !== null) yield* rollBackTo(sessionId, SessionMessage.ID.make(step.messageId));
+            return {
+              ...(yield* snapshotOf(providerThread, sessionId)),
+              ...(step === null ? {} : { cutFromOrdinal: step.ordinal }),
+            };
           }
           const boundary = yield* boundaryAfter(
             rollbackInput.providerThreadTurns,
