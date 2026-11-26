@@ -142,7 +142,7 @@ it.layer(layerTest)("ContextHandoffService legacy import", (it) => {
           importedItem({
             role: "user",
             id: "long-single-token",
-            text: `${"🧪".repeat(20_000)}LATEST_SINGLE_TOKEN`,
+            text: `${"🧪".repeat(40_000)}LATEST_SINGLE_TOKEN`,
             ordinal: 2,
           }),
         ],

@@ -16,6 +16,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
 import {
+  boundedHistoricalMessage,
   DEFAULT_HANDOFF_TOKEN_CAP,
   handoffTokenCapConfig,
   handoffCoverage,
@@ -542,7 +543,7 @@ const makeContextHandoffService = Effect.fn("orchestrationV2.ContextHandoffServi
             ? []
             : [
                 {
-                  ...message,
+                  ...boundedHistoricalMessage(message),
                   ...(item.runId === null ? {} : { runStatus: runStatuses.get(item.runId) }),
                 },
               ];
