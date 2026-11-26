@@ -12,7 +12,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { T, useGT, Var } from "gt-react";
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, EyeIcon } from "lucide-react";
 import {
   memo,
   useEffect,
@@ -23,6 +23,7 @@ import {
 } from "react";
 import { isTrailingDoubleClick } from "../Sidebar.logic";
 import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
 import { MiddleTruncate } from "../ui/middle-truncate";
 import { toastManager } from "../ui/toast";
 import { useThreadActionMenu } from "~/hooks/useThreadActionMenu";
@@ -59,6 +60,13 @@ interface ChatHeaderProps {
   onNewThreadInProject: () => void;
   onOpenProjectSettings?: (() => void) | undefined;
   onFindInThread?: ((threadRef: ScopedThreadRef) => void) | undefined;
+  /**
+   * Set when the agent's context holds less than the thread shows, after a switch of agent or
+   * a compaction: switches the chat between all of it and what the agent has.
+   */
+  contextView?:
+    | { readonly active: boolean; readonly hiddenCount: number; readonly onToggle: () => void }
+    | undefined;
 }
 
 function resolveRenameCommit(input: {
@@ -84,6 +92,7 @@ export const ChatHeader = memo(function ChatHeader({
   onNewThreadInProject,
   onOpenProjectSettings,
   onFindInThread,
+  contextView,
 }: ChatHeaderProps) {
   const gt = useGT();
   const activeProjectName = activeProject?.isScratch ? gt("No project") : activeProject?.title;
@@ -409,6 +418,35 @@ export const ChatHeader = memo(function ChatHeader({
           ) : null}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
+      {contextView ? (
+        <SharedTooltipTrigger
+          side="bottom"
+          render={
+            <Button
+              type="button"
+              size="xs"
+              variant={contextView.active ? "outline" : "ghost-muted"}
+              aria-pressed={contextView.active}
+              data-context-view={contextView.active ? "agent" : "thread"}
+              onClick={contextView.onToggle}
+            />
+          }
+          label={
+            contextView.active ? (
+              <T>Showing only what the agent has in its context. Click to show the whole thread.</T>
+            ) : (
+              // Zero while the steps outside it are in history that has not been loaded yet.
+              gt(
+                "Show only what the agent has in its context. {count, plural, =0 {Earlier parts of this thread are outside it.} one {# step of this thread is outside it.} other {# steps of this thread are outside it.}}",
+                { count: contextView.hiddenCount },
+              )
+            )
+          }
+        >
+          <EyeIcon className="size-3.5" />
+          {contextView.active ? <T>Agent's view</T> : null}
+        </SharedTooltipTrigger>
+      ) : null}
       {isServerThread ? <GuestShareIndicator threadRef={activeThreadRef} /> : null}
     </div>
   );
