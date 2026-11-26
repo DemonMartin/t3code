@@ -2,6 +2,7 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 import { assert, describe, it } from "@effect/vitest";
 import {
   ContextHandoffId,
+  PlanId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -17,6 +18,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import {
+  boundedHistoricalMessage,
   contextUsageForHandoff,
   handoffBudget,
   handoffCoverage,
@@ -164,6 +166,54 @@ describe("handoff budget", () => {
       }),
     );
     assert.equal(historyResponseItems([command!], "Activity")[1]?.type, "message");
+    // What the agent did with its other tools, and where its plan stood, go along too.
+    const tool = historicalMessage({
+      ...base,
+      type: "dynamic_tool",
+      toolName: "Read",
+      input: { file_path: "src/a.ts" },
+      output: "export const a = 1;",
+    });
+    assert.equal(tool?.kind, "dynamic_tool");
+    assert.equal(tool?.text, 'Tool: Read\nInput: {"file_path":"src/a.ts"}\nexport const a = 1;');
+    assert.equal(
+      historicalMessage({
+        ...base,
+        type: "todo_list",
+        planId: PlanId.make("plan:handoff"),
+        steps: [
+          { id: "1", text: "Read the code", status: "completed" },
+          { id: "2", text: "Fix the bug", status: "running" },
+        ],
+      })?.text,
+      "Todo list:\n- [completed] Read the code\n- [running] Fix the bug",
+    );
+  });
+
+  it("shortens a long item to a share of the handoff, keeping more of its end", () => {
+    const message = (kind: string, text: string): OrchestrationV2HistoricalMessage => ({
+      role: "assistant",
+      text,
+      threadId,
+      runId: RunId.make("run:source"),
+      itemId: TurnItemId.make("item:long"),
+      providerThreadId: providerThread.id,
+      status: "completed",
+      kind,
+    });
+    const output = `START${"x".repeat(20_000)}END`;
+    const bounded = boundedHistoricalMessage(message("command_execution", output));
+    assert.isBelow(bounded.text.length, 3_200);
+    assert.isTrue(bounded.text.startsWith("START"));
+    assert.isTrue(bounded.text.endsWith("END"));
+    assert.include(bounded.text, "read item item:long for all of it");
+    // A reply keeps more than a tool's output, and a short item is left as it is.
+    assert.equal(
+      boundedHistoricalMessage(message("assistant_message", output.slice(0, 9_000))).text.length,
+      9_000,
+    );
+    const short = message("command_execution", "ok");
+    assert.strictEqual(boundedHistoricalMessage(short), short);
   });
 
   it("omits oversized multilingual items whole, preserves original constraints and recent work", () => {
@@ -267,7 +317,7 @@ describe("handoff budget", () => {
       assert.equal(
         handoffBudget({
           ...base,
-          tokenCap: 64_000,
+          tokenCap: 16_000,
           modelContextWindow: 1_000_000,
           userText: "x".repeat(70_000),
           attachments,
