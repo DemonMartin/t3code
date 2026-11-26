@@ -33,6 +33,7 @@ import {
   reconcileOptimisticUserMessages,
 } from "./chat/optimisticUserMessages";
 import { useTimelineRewind } from "./chat/useTimelineRewind";
+import { agentContextHiddenItemIds } from "@t3tools/client-runtime/state/agent-context";
 import { useThreadLifecycle } from "./chat/useThreadLifecycle";
 import { useRightPanelActions } from "./chat/useRightPanelActions";
 import { type TerminalLaunchContext, useChatTerminalActions } from "./chat/useChatTerminalActions";
@@ -1714,6 +1715,18 @@ export default function ChatView(props: ChatViewProps) {
   // The structure has no assistant or reasoning text, so those rows stay out of
   // ChatView's own entries (anchoring, rewind, prompt history); ThreadTimeline
   // renders every row from the live turn items.
+  // The agent's view: only the rows the thread's current agent has in its context.
+  const [agentViewThreadKey, setAgentViewThreadKey] = useState<string | null>(null);
+  const outsideAgentContext =
+    serverProjection === null
+      ? null
+      : agentContextHiddenItemIds(serverProjection, serverVisibleTurnItems);
+  const agentViewActive =
+    outsideAgentContext !== null &&
+    outsideAgentContext.size > 0 &&
+    agentViewThreadKey === activeThreadKey;
+  const toggleAgentView = () =>
+    setAgentViewThreadKey((current) => (current === activeThreadKey ? null : activeThreadKey));
   const serverTimelineRows = serverVisibleTurnItems.filter(isCompleteTurnItemRow);
   const hasStreamedTimelineRows =
     isServerThread && serverTimelineRows.length !== serverVisibleTurnItems.length;
@@ -3793,6 +3806,15 @@ export default function ChatView(props: ChatViewProps) {
                 ? { onOpenProjectSettings: handleOpenDraftProjectSettingsStable }
                 : {})}
               {...(threadFindEnabled ? { onFindInThread: openThreadFindStable } : {})}
+              {...(outsideAgentContext !== null && outsideAgentContext.size > 0
+                ? {
+                    contextView: {
+                      active: agentViewActive,
+                      hiddenCount: outsideAgentContext.size,
+                      onToggle: toggleAgentView,
+                    },
+                  }
+                : {})}
             />
           </header>
         )}
@@ -3847,6 +3869,7 @@ export default function ChatView(props: ChatViewProps) {
                   onRespondToApproval={onRespondToApprovalStable}
                   canOperateThread={canOperateThread}
                   threadDetailRef={routeThreadDetailRef}
+                  hiddenItemIds={agentViewActive ? outsideAgentContext : null}
                   entriesInput={timelineEntriesInput}
                   draftEntries={isServerThread ? null : draftTimelineEntries}
                   activeThreadKey={activeThreadKey}

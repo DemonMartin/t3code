@@ -52,7 +52,8 @@ The fork lets a plugin make its own environment the default place a chat runs: o
 - Plugin-managed environments are not offered as "Run on", Auto balance, "Add to another machine" or provider-update targets. The update dialog names the installed and available version of each provider and no longer closes while its rows change.
 - A stopped managed environment shows a quiet starting status instead of a connection error.
 - The started thread opens once its messages are loaded, without an empty page in between.
-- A step inside a turn (a tool call, the agent's thinking, a reply) has "Rewind to here": the model response that produced it leaves the conversation with everything after it, and the next message continues from there. Files stay as they are. OpenCode 2 and Claude support it; Codex can only revert whole turns.
+- A step inside a turn (a tool call, the agent's thinking, a reply) has "Rewind to here": the model response that produced it leaves the conversation with everything after it, and the next message continues from there. "Cut out" takes only that step and keeps what came after. Files stay as they are. OpenCode 2 and Claude support both; Codex can only revert whole turns.
+- When the thread's agent has less in its context than the thread shows (after a switch of agent, a cleared context or a compaction), the header has an "Agent's view" switch that shows only the rows the agent has.
 
 **In the server**
 

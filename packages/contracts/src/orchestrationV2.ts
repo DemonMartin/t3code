@@ -1380,6 +1380,8 @@ export const OrchestrationV2ContextHandoff = Schema.Struct({
       omittedItemIds: Schema.optional(Schema.Array(TurnItemId)),
     }),
   ),
+  /** On the wire, in place of `history` and `delivery`: the items the target was handed. */
+  deliveredItemIds: Schema.optional(Schema.Array(TurnItemId)),
   detailInTurnItem: Schema.optional(Schema.Literal(true)),
   createdByProviderInstanceId: Schema.NullOr(ProviderInstanceId),
   createdAt: Schema.DateTimeUtc,

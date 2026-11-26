@@ -297,8 +297,14 @@ export function projectTurnItemForDetail(item: OrchestrationV2TurnItem): Orchest
 export function projectContextHandoffForWire(
   handoff: OrchestrationV2ContextHandoff,
 ): OrchestrationV2ContextHandoff {
-  const { history: _history, delivery: _delivery, ...projected } = handoff;
-  return { ...projected, summaryText: "" };
+  const { history, delivery, ...projected } = handoff;
+  // Ids only: clients show which rows the target agent was handed, not their text again.
+  const deliveredItemIds = delivery?.itemIds ?? history?.messages.map((message) => message.itemId);
+  return {
+    ...projected,
+    summaryText: "",
+    ...(deliveredItemIds === undefined ? {} : { deliveredItemIds }),
+  };
 }
 
 export function projectThreadProjectionForWire(
