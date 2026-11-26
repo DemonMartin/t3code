@@ -4693,8 +4693,26 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 WHERE thread_id = ${threadId} ORDER BY rowid ASC
               `
               : sql<PayloadRow>`
-                -- Megabytes on a long thread, and projectContextHandoffForWire drops both.
-                SELECT json_remove(payload_json, '$.history', '$.delivery') AS payload_json
+                -- Megabytes on a long thread, and projectContextHandoffForWire drops both. It
+                -- keeps the ids of the items handed over, read here the same way.
+                SELECT CASE
+                  WHEN json_type(payload_json, '$.delivery.itemIds') IS NOT NULL
+                  THEN json_set(
+                    json_remove(payload_json, '$.history', '$.delivery'),
+                    '$.deliveredItemIds',
+                    json_extract(payload_json, '$.delivery.itemIds')
+                  )
+                  WHEN json_type(payload_json, '$.history.messages') IS NOT NULL
+                  THEN json_set(
+                    json_remove(payload_json, '$.history', '$.delivery'),
+                    '$.deliveredItemIds',
+                    (
+                      SELECT json_group_array(json_extract(message.value, '$.itemId'))
+                      FROM json_each(handoff.payload_json, '$.history.messages') AS message
+                    )
+                  )
+                  ELSE json_remove(payload_json, '$.history', '$.delivery')
+                END AS payload_json
                 FROM orchestration_v2_projection_context_handoffs AS handoff
                 WHERE handoff.thread_id = ${threadId}
                   AND (
