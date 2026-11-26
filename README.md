@@ -52,11 +52,14 @@ The fork lets a plugin make its own environment the default place a chat runs: o
 - Plugin-managed environments are not offered as "Run on", Auto balance, "Add to another machine" or provider-update targets. The update dialog names the installed and available version of each provider and no longer closes while its rows change.
 - A stopped managed environment shows a quiet starting status instead of a connection error.
 - The started thread opens once its messages are loaded, without an empty page in between.
+- A step inside a turn (a tool call, the agent's thinking, a reply) has "Rewind to here": the model response that produced it leaves the conversation with everything after it, and the next message continues from there. Files stay as they are. OpenCode 2 and Claude support it; Codex can only revert whole turns.
 
 **In the server**
 
 - With `T3CODE_CODEX_EXTERNAL_SANDBOX=1`, Codex's read-only and workspace-write modes use its external-sandbox policy. Inside a container Codex's own sandbox cannot start; the container is the sandbox.
 - Launcher views may return `status` blocks.
+- A switch to another provider hands over more of the thread: 96 kB by default instead of 16 kB (`T3CODE_CONTEXT_HANDOFF_TOKEN_CAP`, up to 256 kB), with long items shortened instead of dropped, and with tool calls, searches and the todo list included.
+- OpenCode's own browser tools are denied in T3 sessions, so agents use T3's preview tools.
 
 Mobile and desktop clients are unchanged; the features above are in the web client the server hosts.
 
