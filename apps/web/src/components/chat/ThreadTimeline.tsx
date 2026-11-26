@@ -1,4 +1,4 @@
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { ScopedThreadRef, TurnItemId } from "@t3tools/contracts";
 import { type ComponentProps, useLayoutEffect } from "react";
 import { useIncrementalTimelineEntries } from "../../hooks/useIncrementalTimelineEntries";
 import type { TimelineEntriesInput, TimelineEntry } from "../../session-logic";
@@ -24,6 +24,7 @@ export function ThreadTimeline({
   activeThreadKey,
   syncing,
   detailLoading,
+  hiddenItemIds,
   ...timelineProps
 }: Omit<ComponentProps<typeof MessagesTimeline>, "timelineEntries"> & {
   /** Null until the thread's detail may load; see resolveThreadDetailRef. */
@@ -34,8 +35,14 @@ export function ThreadTimeline({
   activeThreadKey: string | null;
   syncing: boolean;
   detailLoading: boolean;
+  /** Rows left out: the agent's view shows only what the agent has in its context. */
+  hiddenItemIds?: ReadonlySet<TurnItemId> | null;
 }) {
-  const visibleTurnItems = useTimelineVisibleTurnItems(threadDetailRef);
+  const allTurnItems = useTimelineVisibleTurnItems(threadDetailRef);
+  const visibleTurnItems =
+    hiddenItemIds == null || hiddenItemIds.size === 0
+      ? allTurnItems
+      : allTurnItems.filter((row) => !hiddenItemIds.has(row.item.id));
   const serverEntries = useIncrementalTimelineEntries(activeThreadKey, {
     ...entriesInput,
     visibleTurnItems,
