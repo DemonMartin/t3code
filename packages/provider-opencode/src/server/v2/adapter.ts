@@ -144,6 +144,7 @@ const OpenCode2ProviderCapabilities = {
     canReadThreadSnapshot: true,
     canRollbackThread: true,
     canRollbackWithinTurn: true,
+    canCutStep: true,
     canForkThread: true,
     canForkFromTurn: true,
     canForkFromSubagentThread: false,
@@ -4368,9 +4369,91 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             ? [candidate.ordinal]
             : [],
         );
-        return { messageId: message.id, ordinal: Math.min(cut.item.ordinal, ...ordinals) };
+        const last = Math.max(cut.item.ordinal, ...ordinals);
+        // The first row of a later message: where the history picks up when only the step goes.
+        const later = cut.items.flatMap((candidate) => {
+          const owner =
+            candidate.nativeItemId === null ? undefined : messageOf.get(candidate.nativeItemId);
+          return candidate.ordinal > last && owner !== undefined && owner.id !== message.id
+            ? [candidate.ordinal]
+            : [];
+        });
+        return {
+          messageId: message.id,
+          agent: message.type === "assistant",
+          ordinal: Math.min(cut.item.ordinal, ...ordinals),
+          ...(later.length === 0 ? {} : { next: Math.min(...later) }),
+        };
       }
       return null;
+    });
+
+    // OpenCode has no call that takes a message out of the middle of a session. Its export and
+    // import do: the session is written back under its own id without the message, so every other
+    // id T3 holds stays good. Deleting a session deletes its subagents' sessions, so they go back
+    // in after it.
+    const removeMessage = Effect.fnUntraced(function* (state: ThreadState, messageId: string) {
+      const transcripts = connection.transcript;
+      if (transcripts === undefined) {
+        return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+          driver: OPENCODE_PROVIDER,
+          detail: "This OpenCode server cannot rewrite a session's history.",
+        });
+      }
+      const descendants: Array<string> = [];
+      for (let index = -1; index < descendants.length; index++) {
+        const parent = index === -1 ? state.sessionId : descendants[index]!;
+        type Page = Effect.Success<ReturnType<typeof client.session.list>>;
+        let page: Parameters<typeof client.session.list>[0] = {
+          parentID: Session.ID.make(parent),
+          limit: 100,
+        };
+        while (page !== undefined) {
+          const children: Page = yield* client.session.list(page);
+          descendants.push(...children.data.map((child) => String(child.id)));
+          // Later pages take the cursor alone.
+          page =
+            children.data.length === 0 || children.cursor.next === undefined
+              ? undefined
+              : { cursor: children.cursor.next };
+        }
+      }
+      const original = yield* transcripts.read(state.sessionId);
+      const saved = yield* Effect.forEach(descendants, transcripts.read);
+      const read = (source: unknown, key: string): unknown =>
+        typeof source === "object" && source !== null ? Reflect.get(source, key) : undefined;
+      const directoryOfTranscript = (transcript: OpenCode2Client.OpenCode2Transcript) => {
+        const directory = read(read(transcript.info, "location"), "directory");
+        return typeof directory === "string" ? directory : state.directory;
+      };
+      yield* client.session.remove({ sessionID: Session.ID.make(state.sessionId) });
+      yield* transcripts
+        .write(
+          {
+            ...original,
+            messages: original.messages.filter((message) => message.id !== messageId),
+          },
+          directoryOfTranscript(original),
+        )
+        .pipe(
+          // A session that would not go back in edited goes back in as it was.
+          Effect.tapError(() =>
+            transcripts
+              .write(original, directoryOfTranscript(original))
+              .pipe(Effect.ignore({ log: true })),
+          ),
+          Effect.ensuring(
+            // Parents first, as the import asks; `descendants` is in that order.
+            Effect.forEach(
+              saved,
+              (child) =>
+                transcripts
+                  .write(child, directoryOfTranscript(child))
+                  .pipe(Effect.ignore({ log: true })),
+              { discard: true },
+            ),
+          ),
+        );
     });
 
     // Rollback must validate full history before native mutation; forks only need prompts.
@@ -5575,8 +5658,27 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           }
           const cut = target.type === "provider_turn" ? target.cut : undefined;
           if (cut !== undefined) {
-            // The step's message sits before every later turn's prompt, so one revert cuts both.
             const step = yield* stepBoundary(sessionId, providerThread.id, cut);
+            if (cut.only === true) {
+              const state = threads.get(sessionId);
+              if (step !== null && (!step.agent || state === undefined)) {
+                return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: OPENCODE_PROVIDER,
+                  detail: "Only a step the agent took can be cut out of an OpenCode session.",
+                });
+              }
+              if (step !== null && state !== undefined) yield* removeMessage(state, step.messageId);
+              return {
+                ...(yield* snapshotOf(providerThread, sessionId)),
+                ...(step === null
+                  ? {}
+                  : {
+                      cutFromOrdinal: step.ordinal,
+                      ...(step.next === undefined ? {} : { cutToOrdinal: step.next }),
+                    }),
+              };
+            }
+            // The step's message sits before every later turn's prompt, so one revert cuts both.
             if (step !== null) yield* rollBackTo(sessionId, SessionMessage.ID.make(step.messageId));
             return {
               ...(yield* snapshotOf(providerThread, sessionId)),

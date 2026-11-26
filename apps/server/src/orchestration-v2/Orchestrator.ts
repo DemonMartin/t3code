@@ -1946,7 +1946,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           if (cutRuns.size === 0) return records.turnItems;
           return records.turnItems.filter((item) => {
             const run = item.runId === null ? undefined : cutRuns.get(item.runId);
-            return run === undefined || !isOrchestrationV2RunItemTruncated(run, item.ordinal);
+            return run === undefined || !isOrchestrationV2RunItemTruncated(run, item);
           });
         }),
         Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
@@ -14941,6 +14941,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
 
       const targetOrdinal = targetCheckpoint.appRunOrdinal ?? 0;
+      if (command.keepLater === true && command.fromItemId === undefined) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "A cut names the step to take out.",
+        });
+      }
       if (command.fromItemId !== undefined) {
         const refuse = (cause: string) =>
           new OrchestratorDispatchError({
@@ -14951,8 +14958,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         if (command.restoreFiles !== false) {
           return yield* refuse("A rewind into a turn leaves files as they are.");
         }
-        if (capabilities.threads.canRollbackWithinTurn !== true) {
+        if (
+          (command.keepLater === true
+            ? capabilities.threads.canCutStep
+            : capabilities.threads.canRollbackWithinTurn) !== true
+        ) {
           return yield* refuse(ROLLBACK_WITHIN_TURN_UNSUPPORTED_MESSAGE);
+        }
+        // A cut keeps later turns, so one of them must not be running on the history it edits.
+        const busy =
+          command.keepLater === true
+            ? projection.runs.find(
+                (run) =>
+                  run.status === "preparing" ||
+                  run.status === "starting" ||
+                  run.status === "running" ||
+                  run.status === "waiting",
+              )
+            : undefined;
+        if (busy !== undefined) {
+          return yield* refuse(`Run ${busy.id} is ${busy.status}; stop it before cutting a step.`);
         }
         const item = yield* projectionStore
           .getTurnItemRef(command.threadId, command.fromItemId)
@@ -14962,6 +14987,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         if (item === undefined || itemRun === undefined || itemRun.ordinal !== targetOrdinal) {
           return yield* refuse(
             `Turn item ${command.fromItemId} is not part of the run checkpoint ${targetCheckpoint.id} follows.`,
+          );
+        }
+        if (command.keepLater === true && item.type === "user_message") {
+          return yield* refuse(
+            "Only the agent's steps can be cut; rewind to your message instead.",
           );
         }
         if (item.providerThreadId !== null && item.providerThreadId !== providerThread.id) {
@@ -15043,6 +15073,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             type: "provider-thread.rollback",
             ...(command.restoreFiles === undefined ? {} : { restoreFiles: command.restoreFiles }),
             ...(command.fromItemId === undefined ? {} : { fromItemId: command.fromItemId }),
+            ...(command.keepLater === true ? { keepLater: true } : {}),
             providerThreadId: providerThread.id,
             checkpointId: targetCheckpoint.id,
             scopeId: targetScope.id,

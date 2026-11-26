@@ -7337,6 +7337,102 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
     }),
   );
 
+  it.effect("takes one step out of a session and keeps the later ones", () =>
+    Effect.gen(function* () {
+      const prompt = `msg_t3_turn_${SESSION}:attempt:opencode2-adapter`;
+      const tool = (id: string) => ({
+        type: "tool",
+        id,
+        name: "shell",
+        state: { status: "completed", input: {}, content: [{ type: "text", text: "ok" }] },
+        time: { created: 1 },
+      });
+      const step = (id: string, content: ReadonlyArray<unknown>) => ({
+        id,
+        type: "assistant",
+        agent: "build",
+        model: { providerID: "gateway", id: "model" },
+        content,
+        time: { created: 1 },
+      });
+      const history = [
+        { id: prompt, time: { created: 1 }, text: "first", type: "user" },
+        step("msg_step_1", [tool("call_1")]),
+        step("msg_step_2", [{ type: "reasoning", text: "next" }, tool("call_2")]),
+        // A field this client's schema does not know must come back as it left.
+        { ...step("msg_step_3", [{ type: "text", text: "done" }]), added: { later: true } },
+      ];
+      const info = { id: SESSION, location: { directory: "/workspace/project" }, added: 1 };
+      const kept = history.filter((message) => message.id !== "msg_step_2");
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+        promptAccepted,
+        event("session.execution.started", { sessionID: SESSION }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+        out("message.list", "<any>"),
+        reply("message.list", { data: history, cursor: {} }),
+        // Deleting a session deletes its subagents' sessions; this one has none.
+        out("session.list", { parentID: SESSION, limit: "100" }),
+        reply("session.list", { data: [], cursor: {} }),
+        out("session.export", { sessionID: SESSION }),
+        replyData("session.export", { info, messages: history }),
+        out("session.remove", { sessionID: SESSION }),
+        reply("session.remove", null),
+        out("session.import", {
+          info,
+          messages: kept,
+          location: { directory: "/workspace/project" },
+        }),
+        replyData("session.import", info),
+        out("message.list", "<any>"),
+        reply("message.list", { data: kept, cursor: {} }),
+      ]);
+      const ended = yield* Deferred.make<OrchestrationV2ProviderTurn>();
+      yield* runtime.events.pipe(
+        Stream.tap((event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status !== "running"
+            ? Deferred.succeed(ended, event.providerTurn)
+            : Effect.void,
+        ),
+        Stream.runDrain,
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(turnInput(thread));
+      const turn = yield* Deferred.await(ended);
+      const item = (
+        ordinal: number,
+        type: "reasoning" | "dynamic_tool" | "assistant_message",
+        nativeItemId: string,
+      ) => ({
+        id: TurnItemId.make(`item:${ordinal}`),
+        ordinal,
+        type,
+        providerThreadId: thread.id,
+        providerTurnId: turn.id,
+        nativeItemId,
+      });
+      const items = [
+        item(101, "dynamic_tool", "call_1"),
+        item(102, "reasoning", "msg_step_2:reasoning:0"),
+        item(103, "dynamic_tool", "call_2"),
+        item(104, "assistant_message", "msg_step_3:text:0"),
+      ];
+      const snapshot = yield* runtime.rollbackThread({
+        providerThread: thread,
+        target: {
+          type: "provider_turn",
+          checkpointId: CheckpointId.make("checkpoint:first"),
+          appRunOrdinal: 1,
+          providerTurn: turn,
+          cut: { item: items[2]!, items, only: true },
+        },
+        providerThreadTurns: [turn],
+      });
+      assert.equal(snapshot.cutFromOrdinal, 102);
+      assert.equal(snapshot.cutToOrdinal, 104);
+    }),
+  );
+
   it.effect("starts a turn sent during a rollback only once the cut is made", () =>
     Effect.gen(function* () {
       const prompted = `msg_t3_turn_${SESSION}:attempt:earlier`;

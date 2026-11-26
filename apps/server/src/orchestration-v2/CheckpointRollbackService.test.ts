@@ -824,7 +824,7 @@ const seedRollbackHistory = Effect.gen(function* () {
   const rollbackCounts: number[] = [];
   const cuts: Array<ProviderAdapter.ProviderAdapterV2TurnCut | undefined> = [];
   /** What the provider reports as the first item it cut; absent leaves the item asked for. */
-  const cutFrom: { ordinal?: number } = {};
+  const cutFrom: { ordinal?: number; next?: number } = {};
   const restored: CheckpointId[] = [];
   const deletedRefs: CheckpointId[] = [];
   const discardedRepositoryOrdinals: number[] = [];
@@ -876,6 +876,7 @@ const seedRollbackHistory = Effect.gen(function* () {
                   return {
                     providerThread: input.providerThread,
                     ...(cutFrom.ordinal === undefined ? {} : { cutFromOrdinal: cutFrom.ordinal }),
+                    ...(cutFrom.next === undefined ? {} : { cutToOrdinal: cutFrom.next }),
                   };
                 }),
             } as never),
@@ -884,7 +885,12 @@ const seedRollbackHistory = Effect.gen(function* () {
       ),
     ),
   );
-  const rollback = (ordinal: number, restoreFiles?: boolean, fromItemId?: TurnItemId) =>
+  const rollback = (
+    ordinal: number,
+    restoreFiles?: boolean,
+    fromItemId?: TurnItemId,
+    keepLater?: boolean,
+  ) =>
     Effect.gen(function* () {
       const service = yield* CheckpointRollbackService.CheckpointRollbackServiceV2;
       yield* service.execute({
@@ -894,6 +900,7 @@ const seedRollbackHistory = Effect.gen(function* () {
         checkpointId: checkpointId(ordinal),
         ...(restoreFiles === undefined ? {} : { restoreFiles }),
         ...(fromItemId === undefined ? {} : { fromItemId }),
+        ...(keepLater === true ? { keepLater: true } : {}),
       });
     }).pipe(Effect.provide(serviceLayer));
 
@@ -1064,7 +1071,7 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
             const refs = yield* history.store.getRunItemRefs(history.threadId, history.runId(2));
             return refs
               .map((ref) => ref.ordinal)
-              .filter((ordinal) => !isOrchestrationV2RunItemTruncated(cutRun!, ordinal));
+              .filter((ordinal) => !isOrchestrationV2RunItemTruncated(cutRun!, { ordinal }));
           });
         assert.deepEqual(yield* visible(), [200, 201]);
         const run = yield* history.store.getRun(history.threadId, history.runId(2));
@@ -1082,6 +1089,45 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
           [200, 201],
         );
         assert.deepEqual(yield* visible(), [200]);
+      }),
+    );
+
+    it.effect("takes one step out of a run and leaves the later runs alone", () =>
+      Effect.gen(function* () {
+        const history = yield* seedRollbackHistory;
+        // The step is items 202 and 203; item 204 belongs to the next one.
+        history.cutFrom.ordinal = 202;
+        history.cutFrom.next = 204;
+
+        yield* history.rollback(2, false, history.itemId(203), true);
+
+        assert.deepEqual(
+          history.cuts.map((cut) => [cut?.item.ordinal, cut?.only]),
+          [[203, true]],
+        );
+        // The store is shared with the tests above, which cut this run too: read the new cut.
+        const run = yield* history.store.getRun(history.threadId, history.runId(2));
+        const cut = run?.truncations?.at(-1);
+        assert.deepEqual([cut?.fromOrdinal, cut?.toOrdinal], [202, 204]);
+        assert.deepEqual(
+          [200, 201, 202, 203, 204].filter(
+            (ordinal) => !isOrchestrationV2RunItemTruncated({ truncations: [cut!] }, { ordinal }),
+          ),
+          [200, 201, 204],
+        );
+        // Nothing is rewound: no run is rolled back and no checkpoint goes stale.
+        assert.isFalse(history.committed.some((event) => event.type === "checkpoint.captured"));
+        assert.deepEqual(
+          history.committed.flatMap((event) =>
+            event.type === "run.updated" ? [[event.payload.id, event.payload.status]] : [],
+          ),
+          [[history.runId(2), "completed"]],
+        );
+        assert.deepEqual(history.deletedRefs, []);
+        const records = yield* history.store.getThreadRecords(history.threadId, [
+          "providerThreads",
+        ]);
+        assert.equal(records.providerThreads[0]?.lastRunOrdinal, 6);
       }),
     );
 

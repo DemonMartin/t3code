@@ -1,6 +1,6 @@
 import type { OrchestrationV2ProjectedTurnItem } from "@t3tools/contracts";
 import { T, useGT } from "gt-react";
-import { HistoryIcon } from "lucide-react";
+import { HistoryIcon, ScissorsIcon } from "lucide-react";
 import { use } from "react";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -26,8 +26,9 @@ function canRewindToStep(projectedItem: OrchestrationV2ProjectedTurnItem): boole
 }
 
 /**
- * "Rewind to here" on a step inside a turn. In a work row it appears on hover, like the row's
- * timestamp; beside a reply it follows the reply's own actions.
+ * "Cut out" and "Rewind to here" on a step inside a turn: the first takes just that step out of
+ * the conversation, the second everything from it on. In a work row they appear on hover, like
+ * the row's timestamp; beside a reply they follow the reply's own actions.
  */
 export function TimelineStepRewindButton({
   projectedItem,
@@ -49,7 +50,7 @@ export function TimelineStepRewindButton({
   )
     return null;
 
-  const button = (
+  const action = (only: boolean) => (
     <Tooltip>
       <TooltipTrigger
         render={
@@ -57,30 +58,38 @@ export function TimelineStepRewindButton({
             type="button"
             size={placement === "row" ? "icon-micro" : "xs"}
             variant={placement === "row" ? "ghost-muted" : "ghost"}
-            data-step-rewind={projectedItem.sourceItemId}
+            {...(only
+              ? { "data-step-cut": projectedItem.sourceItemId }
+              : { "data-step-rewind": projectedItem.sourceItemId })}
             disabled={activity.isRevertingCheckpoint || activity.isWorking}
             onClick={(event) => {
               // The row itself toggles its details.
               event.stopPropagation();
-              onRewindToStep({ itemId: projectedItem.sourceItemId, runId });
+              onRewindToStep({ itemId: projectedItem.sourceItemId, runId, only });
             }}
             onKeyDown={(event) => event.stopPropagation()}
-            aria-label={gt("Rewind to here")}
+            aria-label={only ? gt("Cut out") : gt("Rewind to here")}
           />
         }
       >
-        <HistoryIcon className="size-3" />
+        {only ? <ScissorsIcon className="size-3" /> : <HistoryIcon className="size-3" />}
       </TooltipTrigger>
-      <TooltipPopup side="top">
-        <T>Rewind to here</T>
-      </TooltipPopup>
+      <TooltipPopup side="top">{only ? <T>Cut out</T> : <T>Rewind to here</T>}</TooltipPopup>
     </Tooltip>
   );
-  if (placement === "reply") return button;
+  if (placement === "reply") {
+    return (
+      <>
+        {action(true)}
+        {action(false)}
+      </>
+    );
+  }
   return (
     // Takes no room until the row is hovered or focused, so labels keep their width.
-    <span className="pointer-events-none absolute flex shrink-0 opacity-0 group-hover/timeline-row:pointer-events-auto group-hover/timeline-row:static group-hover/timeline-row:opacity-100 group-focus-within/timeline-row:pointer-events-auto group-focus-within/timeline-row:static group-focus-within/timeline-row:opacity-100 pointer-coarse:pointer-events-auto pointer-coarse:static pointer-coarse:opacity-100">
-      {button}
+    <span className="pointer-events-none absolute flex shrink-0 gap-0.5 opacity-0 group-hover/timeline-row:pointer-events-auto group-hover/timeline-row:static group-hover/timeline-row:opacity-100 group-focus-within/timeline-row:pointer-events-auto group-focus-within/timeline-row:static group-focus-within/timeline-row:opacity-100 pointer-coarse:pointer-events-auto pointer-coarse:static pointer-coarse:opacity-100">
+      {action(true)}
+      {action(false)}
     </span>
   );
 }

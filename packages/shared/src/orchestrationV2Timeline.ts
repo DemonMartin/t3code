@@ -60,7 +60,8 @@ export function isOrchestrationV2TurnItemVisible(input: {
       (run) =>
         run.id === item.runId &&
         (run.status === "rolled_back" ||
-          (item.ordinal !== undefined && isOrchestrationV2RunItemTruncated(run, item.ordinal))),
+          (item.ordinal !== undefined &&
+            isOrchestrationV2RunItemTruncated(run, { ordinal: item.ordinal, type: item.type }))),
     )
   ) {
     return false;
@@ -121,7 +122,7 @@ export function createOrchestrationV2TurnItemVisibility(input: {
     if (
       cut !== undefined &&
       item.ordinal !== undefined &&
-      isOrchestrationV2RunItemTruncated(cut, item.ordinal)
+      isOrchestrationV2RunItemTruncated(cut, { ordinal: item.ordinal, type: item.type })
     )
       return false;
     if (

@@ -269,6 +269,31 @@ describe("a rewind into a run", () => {
   });
 });
 
+describe("a step cut out of a run", () => {
+  const run = {
+    id: runId,
+    status: "completed" as const,
+    truncations: [{ fromOrdinal: 4, toOrdinal: 7, at: "2026-11-26T10:00:00.000Z" }],
+  };
+  const row = (ordinal: number, type: "dynamic_tool" | "user_message" = "dynamic_tool") => ({
+    type,
+    runId,
+    nodeId,
+    ordinal,
+    ...(type === "user_message" ? { inputIntent: "steer" as const } : {}),
+  });
+
+  it("hides the step's rows, and neither what follows nor what the user sent meanwhile", () => {
+    const rows = [row(3), row(4), row(5, "user_message"), row(6), row(7), row(9)];
+    const visible = createOrchestrationV2TurnItemVisibility({
+      runs: [run],
+      attempts: [],
+      items: rows,
+    });
+    expect(rows.filter(visible).map((item) => item.ordinal)).toEqual([3, 5, 7, 9]);
+  });
+});
+
 describe("indexed timeline visibility", () => {
   it.each([
     ...[...ordinaryStatuses, "queued" as const].flatMap(

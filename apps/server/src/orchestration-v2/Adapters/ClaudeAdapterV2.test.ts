@@ -430,6 +430,108 @@ describe("ClaudeAdapterV2 native resume history", () => {
     });
   });
 
+  describe("one step cut out of a transcript", () => {
+    const providerThreadId = ProviderThreadId.make("provider-thread:cut");
+    const line = (
+      uuid: string,
+      parentUuid: string | null,
+      type: "user" | "assistant" | "attachment",
+      message?: unknown,
+    ) => JSON.stringify({ parentUuid, type, uuid, ...(message === undefined ? {} : { message }) });
+    const block = (uuid: string, parent: string, response: string, content: unknown) =>
+      line(uuid, parent, "assistant", { id: response, content: [content] });
+    const result = (uuid: string, parent: string, toolUseId: string) =>
+      line(uuid, parent, "user", {
+        content: [{ type: "tool_result", tool_use_id: toolUseId, content: "ok" }],
+      });
+    const call = (id: string) => ({ type: "tool_use", id, name: "Bash", input: {} });
+    const transcript = [
+      JSON.stringify({ type: "mode", mode: "default" }),
+      line("prompt", null, "user", { content: "go" }),
+      block("call-1", "prompt", "response-1", call("tool-1")),
+      result("result-1", "call-1", "tool-1"),
+      block("think-2", "result-1", "response-2", { type: "thinking", thinking: "second" }),
+      block("call-2a", "think-2", "response-2", call("tool-2a")),
+      result("result-2a", "call-2a", "tool-2a"),
+      block("call-2b", "result-2a", "response-2", call("tool-2b")),
+      result("result-2b", "call-2b", "tool-2b"),
+      line("note", "result-2b", "attachment"),
+      block("reply", "note", "response-3", { type: "text", text: "done" }),
+      JSON.stringify({ type: "last-prompt", leafUuid: "reply" }),
+      "",
+    ];
+    const item = (ordinal: number, nativeItemId: string) => ({
+      id: TurnItemId.make(`item:${ordinal}`),
+      ordinal,
+      type: "dynamic_tool" as const,
+      providerThreadId,
+      providerTurnId: null,
+      nativeItemId,
+    });
+    const items = [
+      item(1, "tool-1"),
+      item(2, "response-2:thinking:0"),
+      item(3, "tool-2a"),
+      item(4, "tool-2b"),
+      item(5, "reply"),
+    ];
+    const uuids = (lines: ReadonlyArray<string>) =>
+      lines.flatMap((entry) => {
+        const uuid = entry === "" ? undefined : (JSON.parse(entry) as { uuid?: string }).uuid;
+        return uuid === undefined ? [] : [uuid];
+      });
+    const cutAt = (ordinal: number, lines = transcript) => {
+      const edit = ClaudeAdapterV2.claudeTranscriptWithoutStep(
+        lines,
+        { item: items.find((candidate) => candidate.ordinal === ordinal)!, items, only: true },
+        providerThreadId,
+      );
+      if (edit === null || edit === "not-a-step") throw new Error(`no step at ${ordinal}`);
+      return edit;
+    };
+
+    it("takes the response, its tool results and nothing else", () => {
+      const edit = cutAt(3);
+      assert.deepEqual(uuids(edit.lines), ["prompt", "call-1", "result-1", "note", "reply"]);
+      // The note that hung off the step now hangs off what came before it.
+      const note = JSON.parse(edit.lines.find((entry) => entry.includes('"note"'))!);
+      assert.equal(note.parentUuid, "result-1");
+      // Lines the cut does not touch are the same text, and the file still ends in a newline.
+      assert.equal(edit.lines[0], transcript[0]);
+      assert.equal(edit.lines.at(-1), "");
+      assert.deepEqual([edit.fromOrdinal, edit.toOrdinal], [2, 5]);
+      assert.equal(edit.replacementOf("result-2b"), "result-1");
+      assert.isUndefined(edit.replacementOf("reply"));
+    });
+
+    it("moves the recorded end of the conversation when the last step goes", () => {
+      const edit = cutAt(5);
+      assert.deepEqual(uuids(edit.lines).at(-1), "note");
+      assert.equal(JSON.parse(edit.lines.at(-2)!).leafUuid, "note");
+      assert.deepEqual([edit.fromOrdinal, edit.toOrdinal], [5, undefined]);
+    });
+
+    it("leaves the user's own message and an absent step alone", () => {
+      const own = { ...items[0]!, nativeItemId: "prompt" };
+      assert.equal(
+        ClaudeAdapterV2.claudeTranscriptWithoutStep(
+          transcript,
+          { item: own, items: [own], only: true },
+          providerThreadId,
+        ),
+        "not-a-step",
+      );
+      // Cut twice: the second time there is nothing left to take.
+      assert.isNull(
+        ClaudeAdapterV2.claudeTranscriptWithoutStep(
+          cutAt(5).lines,
+          { item: items[4]!, items: [items[4]!], only: true },
+          providerThreadId,
+        ),
+      );
+    });
+  });
+
   it("recognizes history that ends on a failed request", () => {
     const failed = {
       uuid: "failed",

@@ -205,10 +205,12 @@ interface PendingRevert {
 
 const revertConfirmAtom = makeThreadOverlayAtom<PendingRevert>("revert-confirm");
 
-/** A step inside a turn the user asked to rewind to. */
+/** A step inside a turn the user asked to rewind to, or to cut out on its own. */
 export interface PendingStepRewind {
   readonly itemId: TurnItemId;
   readonly runId: RunId;
+  /** Only this step leaves the conversation; what came after it stays. */
+  readonly only?: boolean;
 }
 
 const stepRewindConfirmAtom = makeThreadOverlayAtom<PendingStepRewind>("step-rewind-confirm");
@@ -232,13 +234,20 @@ export function StepRewindConfirmHost(props: {
       <AlertDialogPopup>
         <AlertDialogHeader>
           <AlertDialogTitle>
-            <T>Rewind to here?</T>
+            {pending?.only === true ? <T>Cut this step out?</T> : <T>Rewind to here?</T>}
           </AlertDialogTitle>
           <AlertDialogDescription>
-            <T>
-              The chat goes back to just before this step. The step and everything after it leave
-              the conversation, so your next message continues from there. Files stay as they are.
-            </T>
+            {pending?.only === true ? (
+              <T>
+                This step leaves the conversation: the agent no longer sees it or its result.
+                Everything before and after it stays, and files stay as they are.
+              </T>
+            ) : (
+              <T>
+                The chat goes back to just before this step. The step and everything after it leave
+                the conversation, so your next message continues from there. Files stay as they are.
+              </T>
+            )}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -252,7 +261,7 @@ export function StepRewindConfirmHost(props: {
               props.onConfirm(pending);
             }}
           >
-            <T>Rewind</T>
+            {pending?.only === true ? <T>Cut out</T> : <T>Rewind</T>}
           </Button>
         </AlertDialogFooter>
       </AlertDialogPopup>

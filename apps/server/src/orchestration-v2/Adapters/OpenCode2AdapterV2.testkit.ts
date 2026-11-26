@@ -80,6 +80,12 @@ const operationOf = (
   if (method === "GET" && path === "/api/model") return { type: "model.list", input: query };
   if (method === "GET" && path === "/api/agent") return { type: "agent.list", input: query };
   if (method === "POST" && path === "/api/session") return { type: "session.create", input: body };
+  if (method === "GET" && path === "/api/session") return { type: "session.list", input: query };
+  if (method === "POST" && path === "/api/experimental/session/import")
+    return { type: "session.import", input: body };
+  const exported = /^\/api\/experimental\/session\/([^/]+)\/export$/.exec(path);
+  if (method === "GET" && exported !== null)
+    return { type: "session.export", input: { sessionID: exported[1] } };
   if (method === "GET" && path === "/api/session/active") return { type: "session.active" };
   if (method === "GET" && path === "/api/command") return { type: "command.list", input: query };
   const mcp = /^\/api\/experimental\/mcp\/([^/]+)$/.exec(path);

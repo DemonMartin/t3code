@@ -236,6 +236,7 @@ export function useTimelineRewind(input: TimelineRewindInput) {
             turnCount,
             restoreFiles: false,
             fromItemId: target.itemId,
+            ...(target.only === true ? { keepLater: true } : {}),
             ...(checkpoint === undefined
               ? {}
               : { checkpointId: checkpoint.id, scopeId: checkpoint.scopeId }),
@@ -246,7 +247,10 @@ export function useTimelineRewind(input: TimelineRewindInput) {
     ).then(
       () => null,
       (error: unknown) =>
-        thrownErrorMessage(error, m) ?? m(msg("Failed to rewind the conversation.")),
+        thrownErrorMessage(error, m) ??
+        (target.only === true
+          ? m(msg("Failed to cut the step out."))
+          : m(msg("Failed to rewind the conversation."))),
     );
     useComposerDraftStore.setState((store) => {
       const remaining = new Set(store.rewindingThreadKeys);
@@ -257,7 +261,8 @@ export function useTimelineRewind(input: TimelineRewindInput) {
       setThreadError(activeThread.id, failure);
       return;
     }
-    // The next message continues from the step, so the composer is where the user goes next.
+    // After a rewind the next message continues from the step, so the composer comes next.
+    if (target.only === true) return;
     requestAnimationFrame(() => {
       if (currentRouteThreadKeyRef.current === routeThreadKey) composerRef.current?.focusAtEnd();
     });

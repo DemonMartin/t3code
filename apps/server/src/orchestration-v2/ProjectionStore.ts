@@ -3497,6 +3497,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                       AND EXISTS (
                         SELECT 1 FROM json_each(run.payload_json, '$.truncations') AS cut
                         WHERE item.ordinal >= json_extract(cut.value, '$.fromOrdinal')
+                          -- One step cut out: it ends at toOrdinal and takes no user message.
+                          AND (
+                            json_extract(cut.value, '$.toOrdinal') IS NULL
+                            OR (
+                              item.ordinal < json_extract(cut.value, '$.toOrdinal')
+                              AND item.type <> 'user_message'
+                            )
+                          )
                           AND (
                             ${window.requiredRunId ?? null} IS NULL
                             OR julianday(json_extract(cut.value, '$.at')) < julianday(${
@@ -5702,6 +5710,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 AND instr(run.payload_json, '"truncations":') > 0
                 AND orchestration_v2_projection_turn_items.ordinal
                   >= json_extract(cut.value, '$.fromOrdinal')
+                AND (
+                  json_extract(cut.value, '$.toOrdinal') IS NULL
+                  OR (
+                    orchestration_v2_projection_turn_items.ordinal
+                      < json_extract(cut.value, '$.toOrdinal')
+                    AND orchestration_v2_projection_turn_items.type <> 'user_message'
+                  )
+                )
             )
           ORDER BY ordinal ASC, turn_item_id ASC
         `;

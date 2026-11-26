@@ -151,8 +151,7 @@ export function mergeOlderHistoryIntoProjection(
       if (row.item.runId !== null && rolledBackRuns.has(row.item.runId)) continue;
       // The same for a rewind into a run, which hides its later rows.
       const cutRun = row.item.runId === null ? undefined : cutRuns.get(row.item.runId);
-      if (cutRun !== undefined && isOrchestrationV2RunItemTruncated(cutRun, row.item.ordinal))
-        continue;
+      if (cutRun !== undefined && isOrchestrationV2RunItemTruncated(cutRun, row.item)) continue;
     }
     pageKeys.add(key);
     page.push(row);

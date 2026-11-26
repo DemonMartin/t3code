@@ -67,9 +67,16 @@ export interface TimelineRowSharedState {
   runs: ReadonlyArray<HandoffTimelineRun>;
   activeThreadEnvironmentId: EnvironmentId;
   onRevertToTurnCount: (targetTurnCount: number, messageId: MessageId) => void;
-  /** Absent hides "Rewind to here" on steps: the agent cannot rewind into a turn. */
+  /**
+   * Absent hides "Rewind to here" and "Cut out" on steps: the agent cannot change a turn's
+   * history. With `only`, just that step leaves and later ones stay.
+   */
   onRewindToStep:
-    | ((target: { readonly itemId: TurnItemId; readonly runId: RunId }) => void)
+    | ((target: {
+        readonly itemId: TurnItemId;
+        readonly runId: RunId;
+        readonly only?: boolean;
+      }) => void)
     | undefined;
   onUseArtifactTemplate: (template: CodexArtifactTemplate) => void;
   onSendAppMessage: ((text: string) => Promise<void>) | undefined;

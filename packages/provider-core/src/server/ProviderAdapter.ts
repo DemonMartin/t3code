@@ -662,6 +662,11 @@ export interface ProviderAdapterV2ThreadSnapshot {
    * holds. Absent when that is the item asked for.
    */
   readonly cutFromOrdinal?: number;
+  /**
+   * After a cut of one step (`cut.only`): the ordinal of the first item after the step that the
+   * conversation still holds. Absent when the step was the last of its run.
+   */
+  readonly cutToOrdinal?: number;
   /** Provider turns whose native refs a rollback with a `cut` moved. */
   readonly providerTurns?: ReadonlyArray<OrchestrationV2ProviderTurn>;
 }
@@ -685,6 +690,11 @@ export interface ProviderAdapterV2TurnCut {
   readonly item: ProviderAdapterV2TurnItemRef;
   /** The run's items, in timeline order. */
   readonly items: ReadonlyArray<ProviderAdapterV2TurnItemRef>;
+  /**
+   * Only the step leaves; later steps and turns stay. Only sent when `threads.canCutStep` is
+   * set. Without it, everything after the step leaves too.
+   */
+  readonly only?: boolean;
 }
 
 export interface ProviderAdapterV2ReadThreadSnapshotInput {

@@ -112,6 +112,8 @@ export interface CheckpointRollbackServiceV2Shape {
      * it, leave the conversation. Files stay as they are.
      */
     readonly fromItemId?: TurnItemId;
+    /** With `fromItemId`: only that step leaves; later steps and turns stay as they are. */
+    readonly keepLater?: boolean;
   }) => Effect.Effect<void, CheckpointRollbackExecutionError>;
 }
 
@@ -162,11 +164,15 @@ export const layer: Layer.Layer<
       readonly restoreFiles?: boolean;
       readonly requestId?: CommandId;
       readonly fromItemId?: TurnItemId;
+      readonly keepLater?: boolean;
     }) {
       const context = yield* projections.getCheckpointRollbackContext(input.threadId, input);
       if (context.thread.deletedAt !== null) return;
-      const { providerThread, checkpoint, scope, targetAttempt, runsToRollback, staleCheckpoints } =
-        context;
+      const { providerThread, checkpoint, scope, targetAttempt } = context;
+      // One step cut out leaves the later runs, and so their checkpoints, where they are.
+      const keepLater = input.keepLater === true && input.fromItemId !== undefined;
+      const runsToRollback = keepLater ? [] : context.runsToRollback;
+      const staleCheckpoints = keepLater ? [] : context.staleCheckpoints;
       // A cut leaves files alone: snapshots exist per run, not per step.
       const restoreFiles = input.restoreFiles !== false && input.fromItemId === undefined;
       const { worktreePath, branch } = context.thread;
@@ -269,7 +275,7 @@ export const layer: Layer.Layer<
               }
               // Earlier cuts already took their items out of the provider's history.
               const items = (yield* projections.getRunItemRefs(input.threadId, run.id)).filter(
-                (candidate) => !isOrchestrationV2RunItemTruncated(run, candidate.ordinal),
+                (candidate) => !isOrchestrationV2RunItemTruncated(run, candidate),
               );
               return { run, item, items };
             });
@@ -456,7 +462,7 @@ export const layer: Layer.Layer<
 
       const snapshot: Pick<
         ProviderAdapter.ProviderAdapterV2ThreadSnapshot,
-        "providerThread" | "cutFromOrdinal" | "providerTurns"
+        "providerThread" | "cutFromOrdinal" | "cutToOrdinal" | "providerTurns"
       > =
         runsToRollback.length === 0 && cut === undefined
           ? { providerThread }
@@ -465,7 +471,14 @@ export const layer: Layer.Layer<
               target:
                 cut === undefined || rollbackTarget.type !== "provider_turn"
                   ? rollbackTarget
-                  : { ...rollbackTarget, cut: { item: cut.item, items: cut.items } },
+                  : {
+                      ...rollbackTarget,
+                      cut: {
+                        item: cut.item,
+                        items: cut.items,
+                        ...(keepLater ? { only: true } : {}),
+                      },
+                    },
               providerThreadTurns,
             });
       if (restoreFiles) {
@@ -527,7 +540,11 @@ export const layer: Layer.Layer<
               occurredAt: now,
               payload: {
                 ...snapshot.providerThread,
-                lastRunOrdinal: targetOrdinal === 0 ? null : targetOrdinal,
+                lastRunOrdinal: keepLater
+                  ? providerThread.lastRunOrdinal
+                  : targetOrdinal === 0
+                    ? null
+                    : targetOrdinal,
                 updatedAt: now,
               },
             }),
@@ -576,7 +593,15 @@ export const layer: Layer.Layer<
                   ...cut.run,
                   truncations: [
                     ...(cut.run.truncations ?? []),
-                    { fromOrdinal, at: DateTime.formatIso(now) },
+                    {
+                      fromOrdinal,
+                      ...(keepLater &&
+                      snapshot.cutToOrdinal !== undefined &&
+                      snapshot.cutToOrdinal > fromOrdinal
+                        ? { toOrdinal: snapshot.cutToOrdinal }
+                        : {}),
+                      at: DateTime.formatIso(now),
+                    },
                   ],
                 },
               }),

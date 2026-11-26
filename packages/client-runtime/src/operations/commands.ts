@@ -250,6 +250,8 @@ export interface RevertThreadCheckpointInput extends ThreadCommandInput {
    * after it, leave the conversation. Files stay as they are, so `restoreFiles` must be false.
    */
   readonly fromItemId?: TurnItemId;
+  /** With `fromItemId`: only that step leaves; later steps and turns stay. */
+  readonly keepLater?: boolean;
 }
 
 export type StopThreadSessionInput = ThreadCommandInput;
@@ -1076,6 +1078,7 @@ export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThrea
         type: "checkpoint.rollback",
         ...(input.restoreFiles === undefined ? {} : { restoreFiles: input.restoreFiles }),
         ...(input.fromItemId === undefined ? {} : { fromItemId: input.fromItemId }),
+        ...(input.keepLater === true ? { keepLater: true } : {}),
         commandId: yield* allocateCommandId(input),
         threadId: input.threadId,
         scopeId: CheckpointScopeId.make(input.scopeId),
@@ -1115,6 +1118,7 @@ export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThrea
       type: "checkpoint.rollback",
       ...(input.restoreFiles === undefined ? {} : { restoreFiles: input.restoreFiles }),
       ...(input.fromItemId === undefined ? {} : { fromItemId: input.fromItemId }),
+      ...(input.keepLater === true ? { keepLater: true } : {}),
       commandId: yield* allocateCommandId(input),
       threadId: input.threadId,
       scopeId: checkpoint.scopeId,

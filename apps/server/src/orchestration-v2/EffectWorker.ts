@@ -556,6 +556,7 @@ export const layerExecutor: Layer.Layer<
                 ...(effect.request.fromItemId === undefined
                   ? {}
                   : { fromItemId: effect.request.fromItemId }),
+                ...(effect.request.keepLater === true ? { keepLater: true } : {}),
               })
               .pipe(
                 Effect.tapCause((cause) =>

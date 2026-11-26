@@ -66,6 +66,22 @@ const ShellJobs = Schema.Struct({
     }),
   ),
 });
+/**
+ * A session's whole transcript as the server exports it. Only the message ids are read here:
+ * the rest passes through untouched, so fields newer than this client's schema survive a round
+ * trip through `write`.
+ */
+const Transcript = Schema.Struct({
+  info: Schema.Unknown,
+  messages: Schema.Array(
+    Schema.StructWithRest(Schema.Struct({ id: Schema.String, type: Schema.String }), [
+      Schema.Record(Schema.String, Schema.Unknown),
+    ]),
+  ),
+});
+export type OpenCode2Transcript = typeof Transcript.Type;
+const TranscriptExport = Schema.Struct({ data: Transcript });
+
 export class OpenCode2ImageError extends Schema.TaggedError<OpenCode2ImageError>()(
   "OpenCode2ImageError",
   { cause: Schema.Defect() },
@@ -105,6 +121,19 @@ export interface OpenCode2Api {
   readonly imageJobs: (
     sessionID: string,
   ) => Effect.Effect<ReadonlyArray<typeof NativeImageJob.Type>, OpenCode2ImageError>;
+  /**
+   * Reads a session's transcript, and writes one back as a session that does not exist: the
+   * way to change history in the middle, which OpenCode has no call for.
+   */
+  readonly transcript?: {
+    readonly read: (
+      sessionID: string,
+    ) => Effect.Effect<OpenCode2Transcript, HttpClientError.HttpClientError | Schema.SchemaError>;
+    readonly write: (
+      transcript: OpenCode2Transcript,
+      directory: string,
+    ) => Effect.Effect<void, HttpClientError.HttpClientError>;
+  };
   readonly readImage: (
     path: string,
     directory: string,
@@ -291,6 +320,29 @@ export const make = Effect.gen(function* () {
                 Effect.flatMap(HttpClientResponse.schemaBodyJson(ShellJobs)),
               );
           }),
+          transcript: {
+            read: Effect.fn("OpenCode2Client.transcript.read")(function (sessionID: string) {
+              return authenticated
+                .get(`${baseUrl}/api/experimental/session/${encodeURIComponent(sessionID)}/export`)
+                .pipe(
+                  Effect.flatMap(HttpClientResponse.filterStatusOk),
+                  Effect.flatMap(HttpClientResponse.schemaBodyJson(TranscriptExport)),
+                  Effect.map((exported) => exported.data),
+                );
+            }),
+            write: Effect.fn("OpenCode2Client.transcript.write")(function (
+              transcript: OpenCode2Transcript,
+              directory: string,
+            ) {
+              return authenticated
+                .execute(
+                  HttpClientRequest.post(`${baseUrl}/api/experimental/session/import`).pipe(
+                    HttpClientRequest.bodyJsonUnsafe({ ...transcript, location: { directory } }),
+                  ),
+                )
+                .pipe(Effect.flatMap(HttpClientResponse.filterStatusOk), Effect.asVoid);
+            }),
+          },
           imageJobs: (sessionID: string) =>
             authenticated
               .get(`${baseUrl}/api/experimental/job`, {
