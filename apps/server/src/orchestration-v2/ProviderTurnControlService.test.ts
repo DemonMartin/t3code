@@ -190,6 +190,8 @@ function layerProjectionStore(
       getRunMessage: () => Effect.die("not used"),
       getDelegatedChildControls: () => Effect.die("not used"),
       getRun: () => Effect.die("not used"),
+      getTurnItemRef: () => Effect.die("not used"),
+      getRunItemRefs: () => Effect.die("not used"),
       isNodeStored: () => Effect.die("not used"),
       canStartQueuedRun: () => Effect.die("not used"),
       getHeldQueuedRuns: () => Effect.die("not used"),

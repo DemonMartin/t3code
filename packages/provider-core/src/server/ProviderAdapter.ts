@@ -662,6 +662,46 @@ export interface ProviderAdapterV2ThreadSnapshot {
   readonly reasoningMessageIds?: ReadonlyArray<OrchestrationV2ConversationMessage["id"]>;
   readonly runtimeRequests: ReadonlyArray<OrchestrationV2RuntimeRequest>;
   readonly providerPayload?: unknown;
+  /**
+   * After a rollback with a `cut`: the ordinal of the first item the conversation no longer
+   * holds. Absent when that is the item asked for.
+   */
+  readonly cutFromOrdinal?: number;
+  /**
+   * After a cut of one step (`cut.only`): the ordinal of the first item after the step that the
+   * conversation still holds. Absent when the step was the last of its run.
+   */
+  readonly cutToOrdinal?: number;
+  /** Provider turns whose native refs a rollback with a `cut` moved. */
+  readonly providerTurns?: ReadonlyArray<OrchestrationV2ProviderTurn>;
+}
+
+/** A turn item's place in its run: enough to find it in the provider's own history. */
+export interface ProviderAdapterV2TurnItemRef {
+  readonly id: OrchestrationV2TurnItem["id"];
+  readonly ordinal: number;
+  readonly type: OrchestrationV2TurnItem["type"];
+  readonly providerThreadId: OrchestrationV2ProviderThread["id"] | null;
+  readonly providerTurnId: ProviderTurnId | null;
+  readonly nativeItemId: string | null;
+  /** A user message's id; a steer the provider was sent carries it. */
+  readonly messageId?: string;
+}
+
+/**
+ * Cuts a turn short. A model step is one response: its reasoning, text and tool calls. The step
+ * that produced `item` leaves the conversation with everything after it, so the cut can start a
+ * few items before `item`.
+ */
+export interface ProviderAdapterV2TurnCut {
+  readonly item: ProviderAdapterV2TurnItemRef;
+  /** The run's items, in timeline order. */
+  readonly items: ReadonlyArray<ProviderAdapterV2TurnItemRef>;
+  /**
+   * Only the step leaves; later steps and turns stay. Only sent when `threads.canCutStep` is
+   * set. Without it, everything after the step leaves too.
+   */
+  readonly only?: boolean;
 }
 
 export interface ProviderAdapterV2ReadThreadSnapshotInput {
@@ -680,6 +720,8 @@ export type ProviderAdapterV2RollbackTarget =
       readonly appRunOrdinal: number;
       readonly providerTurn: OrchestrationV2ProviderTurn;
       readonly message?: Pick<OrchestrationV2ConversationMessage, "role" | "text" | "attachments">;
+      /** Also cuts the kept run short. Only sent when `threads.canRollbackWithinTurn` is set. */
+      readonly cut?: ProviderAdapterV2TurnCut;
     };
 
 export interface ProviderAdapterV2RollbackThreadInput {

@@ -15,6 +15,7 @@ import {
   RunId,
   RuntimeRequestId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
@@ -104,6 +105,10 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("provider-thread.rollback"),
     restoreFiles: Schema.optional(Schema.Boolean),
+    fromItemId: Schema.optional(TurnItemId),
+    keepLater: Schema.optional(Schema.Boolean),
+    /** The rewind goes back to a turn of another agent: the thread continues with this model. */
+    modelSelection: Schema.optional(ModelSelection),
     providerThreadId: ProviderThreadId,
     checkpointId: CheckpointId,
     scopeId: CheckpointScopeId,

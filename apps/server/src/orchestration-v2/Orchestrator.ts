@@ -23,6 +23,7 @@ import {
   legacyThreadPullRequestKey,
 } from "../sourceControl/threadPullRequests.ts";
 import {
+  isOrchestrationV2RunItemTruncated,
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type ChatAttachment,
   CommandId,
@@ -43,6 +44,7 @@ import {
   type ThreadPullRequestWatch,
   type PullRequestWatchUntil,
   type OrchestrationV2AppThread,
+  type OrchestrationV2Checkpoint,
   type OrchestrationV2ContextHandoff,
   type OrchestrationV2ContextSourcePoint,
   type OrchestrationV2ContextTransfer,
@@ -125,6 +127,7 @@ import * as ProjectStore from "./ProjectStore.ts";
 import * as TaskFolderStore from "../workspace/TaskFolderStore.ts";
 import {
   isCheckpointRestoreIsolated,
+  ROLLBACK_WITHIN_TURN_UNSUPPORTED_MESSAGE,
   SHARED_WORKSPACE_RESTORE_MESSAGE,
 } from "./CheckpointRestoreSafety.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
@@ -1396,6 +1399,51 @@ export function providerTurnForRun(
     : projection.providerTurns.find((turn) => turn.id === namedTurnId);
 }
 
+/**
+ * Where a rewind to `checkpointId` continues when the turn it goes back to was run by another
+ * agent than the active one: that agent's provider thread, with the model that ran the turn.
+ * Undefined stays on the active thread; a string says why the rewind cannot go there.
+ */
+function rewindProviderThread(
+  projection: Pick<
+    OrchestrationV2ThreadProjection,
+    "thread" | "providerThreads" | "checkpoints" | "runs" | "providerTurns" | "attempts"
+  >,
+  checkpointId: OrchestrationV2Checkpoint["id"],
+):
+  | {
+      readonly providerThread: OrchestrationV2ProviderThread;
+      readonly modelSelection: ModelSelection;
+    }
+  | string
+  | undefined {
+  const ordinal =
+    projection.checkpoints.find((candidate) => candidate.id === checkpointId)?.appRunOrdinal ?? 0;
+  const run =
+    ordinal === 0 ? undefined : projection.runs.find((candidate) => candidate.ordinal === ordinal);
+  const turn =
+    run === undefined || run.status === "rolled_back"
+      ? undefined
+      : providerTurnForRun(projection, run);
+  if (
+    run === undefined ||
+    turn === undefined ||
+    turn.providerThreadId === projection.thread.activeProviderThreadId
+  )
+    return undefined;
+  const providerThread = projection.providerThreads.find(
+    (candidate) => candidate.id === turn.providerThreadId,
+  );
+  if (
+    providerThread === undefined ||
+    providerThread.appThreadId !== projection.thread.id ||
+    providerThread.ownerNodeId !== null ||
+    providerThread.providerInstanceId !== run.modelSelection.instanceId
+  )
+    return `Run ${run.id} was run by an agent this thread cannot go back to.`;
+  return { providerThread, modelSelection: run.modelSelection };
+}
+
 function contextSourcePointForRun(
   projection: Pick<
     OrchestrationV2ThreadProjection,
@@ -1934,11 +1982,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     projectionStore
       .getThreadRecords(
         threadId,
-        ["turnItems"],
+        ["turnItems", "runs"],
         runIds === undefined ? undefined : { turnItemRunIds: runIds },
       )
       .pipe(
-        Effect.map((records) => records.turnItems),
+        Effect.map((records) => {
+          // What a rewind into a run cut is no longer part of the conversation.
+          const cutRuns = new Map(
+            records.runs.flatMap((run) => (run.truncations === undefined ? [] : [[run.id, run]])),
+          );
+          if (cutRuns.size === 0) return records.turnItems;
+          return records.turnItems.filter((item) => {
+            const run = item.runId === null ? undefined : cutRuns.get(item.runId);
+            return run === undefined || !isOrchestrationV2RunItemTruncated(run, item);
+          });
+        }),
         Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
       );
 
@@ -2923,10 +2981,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
       const latestCompletedRun = projection.runs.findLast((run) => run.status === "completed");
       const latestHandoffRun = projection.runs.findLast(isHandoffSourceRun);
-      const targetLastCompletedRun = lastDeliveredRunForProviderThread(
-        projection,
-        queuedProviderThread.id,
-      );
+      // A provider thread whose native conversation was dropped (a rewind past it) saw nothing.
+      const targetLastCompletedRun =
+        deliveryProviderThread.nativeThreadRef === null
+          ? undefined
+          : lastDeliveredRunForProviderThread(projection, queuedProviderThread.id);
       const coveredRuns =
         freshContext ||
         canResumeAcrossInstances ||
@@ -9288,8 +9347,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             .pipe(mapDispatchError(command));
     const requiresFullProviderSwitchContext =
       isProviderSwitch && pendingMergeBackTransfer !== undefined;
+    // A provider thread whose native conversation was dropped (a rewind past it) saw nothing.
     const targetLastCompletedRun =
-      targetProviderThread === undefined
+      targetProviderThread === undefined || targetProviderThread.nativeThreadRef === null
         ? undefined
         : lastDeliveredRunForProviderThread(projection, targetProviderThread.id);
     const providerSwitchCoveredRuns =
@@ -14802,16 +14862,27 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Thread ${command.threadId} is deleted.`,
         });
       }
-      const providerThread = projection.providerThreads.find(
+      const activeProviderThread = projection.providerThreads.find(
         (candidate) => candidate.id === projection.thread.activeProviderThreadId,
       );
-      if (providerThread === undefined) {
+      if (activeProviderThread === undefined) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
           cause: "No active provider thread exists for rollback.",
         });
       }
+      const rewindTarget = rewindProviderThread(projection, command.checkpointId);
+      if (typeof rewindTarget === "string") {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: rewindTarget,
+        });
+      }
+      // The conversation goes back to where another agent was: the thread continues with it.
+      const providerThread = rewindTarget?.providerThread ?? activeProviderThread;
+      const switchTo = rewindTarget?.modelSelection;
       if (providerThread.providerSessionId === null) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -14820,7 +14891,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
 
-      const modelSelection = projection.thread.modelSelection;
+      // Another agent takes over the thread; one still working on it must stop first.
+      const busyRun =
+        switchTo === undefined
+          ? undefined
+          : projection.runs.find(
+              (run) =>
+                run.status === "preparing" ||
+                run.status === "starting" ||
+                run.status === "running" ||
+                run.status === "waiting",
+            );
+      if (busyRun !== undefined) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Run ${busyRun.id} is ${busyRun.status}; stop it before rewinding.`,
+        });
+      }
+
+      const modelSelection = switchTo ?? projection.thread.modelSelection;
       const capabilities = yield* providerAdapters.get(modelSelection.instanceId).pipe(
         Effect.flatMap((adapter) => adapter.getCapabilities()),
         Effect.mapError(
@@ -14947,6 +15037,73 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
 
       const targetOrdinal = targetCheckpoint.appRunOrdinal ?? 0;
+      if (command.keepLater === true && command.fromItemId === undefined) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "A cut names the step to take out.",
+        });
+      }
+      if (command.fromItemId !== undefined) {
+        const refuse = (cause: string) =>
+          new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause,
+          });
+        if (command.restoreFiles !== false) {
+          return yield* refuse("A rewind into a turn leaves files as they are.");
+        }
+        if (
+          (command.keepLater === true
+            ? capabilities.threads.canCutStep
+            : capabilities.threads.canRollbackWithinTurn) !== true
+        ) {
+          return yield* refuse(ROLLBACK_WITHIN_TURN_UNSUPPORTED_MESSAGE);
+        }
+        // A cut keeps later turns, so one of them must not be running on the history it edits.
+        const busy =
+          command.keepLater === true
+            ? projection.runs.find(
+                (run) =>
+                  run.status === "preparing" ||
+                  run.status === "starting" ||
+                  run.status === "running" ||
+                  run.status === "waiting",
+              )
+            : undefined;
+        if (busy !== undefined) {
+          return yield* refuse(`Run ${busy.id} is ${busy.status}; stop it before cutting a step.`);
+        }
+        const item = yield* projectionStore
+          .getTurnItemRef(command.threadId, command.fromItemId)
+          .pipe(Effect.mapError((cause) => refuse(String(cause))));
+        const itemRun =
+          item === undefined ? undefined : projection.runs.find((run) => run.id === item.runId);
+        if (item === undefined || itemRun === undefined || itemRun.ordinal !== targetOrdinal) {
+          return yield* refuse(
+            `Turn item ${command.fromItemId} is not part of the run checkpoint ${targetCheckpoint.id} follows.`,
+          );
+        }
+        if (command.keepLater === true && item.type === "user_message") {
+          return yield* refuse(
+            "Only the agent's steps can be cut; rewind to your message instead.",
+          );
+        }
+        if (item.providerThreadId !== null && item.providerThreadId !== providerThread.id) {
+          return yield* refuse(
+            `Turn item ${command.fromItemId} belongs to another agent's conversation.`,
+          );
+        }
+        if (
+          itemRun.status !== "completed" &&
+          itemRun.status !== "interrupted" &&
+          itemRun.status !== "failed" &&
+          itemRun.status !== "cancelled"
+        ) {
+          return yield* refuse(`Run ${itemRun.id} is ${itemRun.status}; stop it before rewinding.`);
+        }
+      }
       if (targetOrdinal > 0) {
         const targetRun = projection.runs.find((run) => run.ordinal === targetOrdinal);
         const targetProviderTurn =
@@ -15011,6 +15168,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           request: {
             type: "provider-thread.rollback",
             ...(command.restoreFiles === undefined ? {} : { restoreFiles: command.restoreFiles }),
+            ...(command.fromItemId === undefined ? {} : { fromItemId: command.fromItemId }),
+            ...(command.keepLater === true ? { keepLater: true } : {}),
+            ...(switchTo === undefined ? {} : { modelSelection: switchTo }),
             providerThreadId: providerThread.id,
             checkpointId: targetCheckpoint.id,
             scopeId: targetScope.id,

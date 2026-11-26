@@ -2,13 +2,17 @@ import {
   CheckpointId,
   CheckpointScopeId,
   type CommandId,
+  isOrchestrationV2RunItemTruncated,
+  type ModelSelection,
   latestProviderTurnForAttempt,
   type OrchestrationV2DomainEvent,
   ProviderThreadId,
   repositoryRewindCheckpoint,
   ThreadId,
+  type TurnItemId,
   VcsProcessExitError,
 } from "@t3tools/contracts";
+import { modelSelectionsEqual } from "@t3tools/shared/model";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -42,6 +46,8 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
 import { RuntimePolicyAboveCeilingError, RuntimePolicyV2 } from "./RuntimePolicy.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+
+const STALE_AGENT_DETACH_REASON = "A rewind discarded turns this session holds.";
 
 export const ROLLBACK_FAILED_MESSAGE =
   "The provider could not roll back this conversation. Try again; if it keeps failing, check the provider and server logs.";
@@ -105,6 +111,18 @@ export interface CheckpointRollbackServiceV2Shape {
     readonly restoreFiles?: boolean;
     /** The rewind command: names the request when repositories are reported as left unrestored. */
     readonly requestId?: CommandId;
+    /**
+     * Also cuts the checkpoint's run short: the model step that produced this item, and all after
+     * it, leave the conversation. Files stay as they are.
+     */
+    readonly fromItemId?: TurnItemId;
+    /** With `fromItemId`: only that step leaves; later steps and turns stay as they are. */
+    readonly keepLater?: boolean;
+    /**
+     * The checkpoint's turn was another agent's: that provider thread, run with this model,
+     * becomes the thread's agent again.
+     */
+    readonly modelSelection?: ModelSelection;
   }) => Effect.Effect<void, CheckpointRollbackExecutionError>;
 }
 
@@ -154,12 +172,19 @@ export const layer: Layer.Layer<
       readonly scopeId: CheckpointScopeId;
       readonly restoreFiles?: boolean;
       readonly requestId?: CommandId;
+      readonly fromItemId?: TurnItemId;
+      readonly keepLater?: boolean;
+      readonly modelSelection?: ModelSelection;
     }) {
       const context = yield* projections.getCheckpointRollbackContext(input.threadId, input);
       if (context.thread.deletedAt !== null) return;
-      const { providerThread, checkpoint, scope, targetAttempt, runsToRollback, staleCheckpoints } =
-        context;
-      const restoreFiles = input.restoreFiles !== false;
+      const { providerThread, checkpoint, scope, targetAttempt } = context;
+      // One step cut out leaves the later runs, and so their checkpoints, where they are.
+      const keepLater = input.keepLater === true && input.fromItemId !== undefined;
+      const runsToRollback = keepLater ? [] : context.runsToRollback;
+      const staleCheckpoints = keepLater ? [] : context.staleCheckpoints;
+      // A cut leaves files alone: snapshots exist per run, not per step.
+      const restoreFiles = input.restoreFiles !== false && input.fromItemId === undefined;
       const { worktreePath, branch } = context.thread;
       const taskFolder = worktreePath === null ? null : yield* taskFolders.find(worktreePath);
       // A linked project folder is not a repository: it has no snapshot, by design.
@@ -187,9 +212,15 @@ export const layer: Layer.Layer<
       ) {
         return yield* invalidTarget();
       }
+      // Going back to another agent's turn makes that agent the thread's again.
+      const modelSelection = input.modelSelection ?? context.thread.modelSelection;
+      const switching =
+        input.modelSelection !== undefined &&
+        (providerThread.id !== context.thread.activeProviderThreadId ||
+          !modelSelectionsEqual(input.modelSelection, context.thread.modelSelection));
       if (
-        providerThread.id !== context.thread.activeProviderThreadId ||
-        providerThread.providerInstanceId !== context.thread.modelSelection.instanceId
+        (!switching && providerThread.id !== context.thread.activeProviderThreadId) ||
+        providerThread.providerInstanceId !== modelSelection.instanceId
       ) {
         return yield* new CheckpointRollbackExecutionError({
           reason: "active-provider-changed",
@@ -239,6 +270,30 @@ export const layer: Layer.Layer<
                 providerTurn: targetTurn,
                 ...(message === undefined ? {} : { message }),
               };
+            });
+
+      const cut =
+        input.fromItemId === undefined
+          ? undefined
+          : yield* Effect.gen(function* () {
+              const item = yield* projections.getTurnItemRef(input.threadId, input.fromItemId!);
+              const run =
+                item === undefined || item.runId === null
+                  ? undefined
+                  : yield* projections.getRun(input.threadId, item.runId);
+              if (
+                item === undefined ||
+                run === undefined ||
+                run.ordinal !== targetOrdinal ||
+                run.status === "rolled_back"
+              ) {
+                return yield* invalidTarget();
+              }
+              // Earlier cuts already took their items out of the provider's history.
+              const items = (yield* projections.getRunItemRefs(input.threadId, run.id)).filter(
+                (candidate) => !isOrchestrationV2RunItemTruncated(run, candidate),
+              );
+              return { run, item, items };
             });
 
       const isolated = isCheckpointRestoreIsolated(context.thread, scope, taskFolder, {
@@ -391,7 +446,6 @@ export const layer: Layer.Layer<
       ];
       if (restoreFiles && restoreTargets.length === 0) return yield* invalidTarget();
 
-      const modelSelection = context.thread.modelSelection;
       const resolvedRuntimePolicy = yield* runtimePolicy.resolve({
         thread: context.thread,
         modelSelection,
@@ -421,12 +475,25 @@ export const layer: Layer.Layer<
           (turn.runAttemptId === null || !rolledBackAttemptIds.has(turn.runAttemptId)),
       );
 
-      const snapshot =
-        runsToRollback.length === 0
+      const snapshot: Pick<
+        ProviderAdapter.ProviderAdapterV2ThreadSnapshot,
+        "providerThread" | "cutFromOrdinal" | "cutToOrdinal" | "providerTurns"
+      > =
+        runsToRollback.length === 0 && cut === undefined
           ? { providerThread }
           : yield* session.rollbackThread({
               providerThread,
-              target: rollbackTarget,
+              target:
+                cut === undefined || rollbackTarget.type !== "provider_turn"
+                  ? rollbackTarget
+                  : {
+                      ...rollbackTarget,
+                      cut: {
+                        item: cut.item,
+                        items: cut.items,
+                        ...(keepLater ? { only: true } : {}),
+                      },
+                    },
               providerThreadTurns,
             });
       if (restoreFiles) {
@@ -479,6 +546,69 @@ export const layer: Layer.Layer<
               }),
             );
           }
+          if (switching) {
+            const thread = yield* projections.getThread(input.threadId);
+            events.push(
+              yield* makeEvent({
+                type:
+                  thread.providerInstanceId === modelSelection.instanceId
+                    ? "thread.model-selection-updated"
+                    : "thread.provider-switched",
+                threadId: input.threadId,
+                providerInstanceId: modelSelection.instanceId,
+                occurredAt: now,
+                payload: {
+                  ...thread,
+                  providerInstanceId: modelSelection.instanceId,
+                  modelSelection,
+                  updatedAt: now,
+                },
+              }),
+            );
+          }
+          // Other agents' conversations still hold the discarded turns. Each starts over the next
+          // time it is used, from a handoff of what is left; before the rewound one, which a
+          // provider thread update makes the thread's agent.
+          for (const stale of context.staleProviderThreads) {
+            if (
+              stale.providerSessionId !== null &&
+              stale.providerSessionId !== providerThread.providerSessionId
+            ) {
+              events.push(
+                yield* makeEvent({
+                  type: "provider-session.detached",
+                  threadId: input.threadId,
+                  driver: stale.driver,
+                  providerInstanceId: stale.providerInstanceId,
+                  occurredAt: now,
+                  payload: {
+                    providerSessionId: stale.providerSessionId,
+                    detachedAt: now,
+                    reason: STALE_AGENT_DETACH_REASON,
+                  },
+                }),
+              );
+            }
+            const { nativeMetadata: _dropped, ...kept } = stale;
+            events.push(
+              yield* makeEvent({
+                type: "provider-thread.updated",
+                threadId: input.threadId,
+                driver: stale.driver,
+                providerInstanceId: stale.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...kept,
+                  providerSessionId: null,
+                  nativeThreadRef: null,
+                  nativeConversationHeadRef: null,
+                  status: "not_loaded",
+                  lastRunOrdinal: null,
+                  updatedAt: now,
+                },
+              }),
+            );
+          }
           events.push(
             yield* makeEvent({
               type: "provider-thread.updated",
@@ -488,7 +618,11 @@ export const layer: Layer.Layer<
               occurredAt: now,
               payload: {
                 ...snapshot.providerThread,
-                lastRunOrdinal: targetOrdinal === 0 ? null : targetOrdinal,
+                lastRunOrdinal: keepLater
+                  ? providerThread.lastRunOrdinal
+                  : targetOrdinal === 0
+                    ? null
+                    : targetOrdinal,
                 updatedAt: now,
               },
             }),
@@ -503,6 +637,51 @@ export const layer: Layer.Layer<
                 providerInstanceId: providerThread.providerInstanceId,
                 occurredAt: now,
                 payload: { ...staleCheckpoint, status: "stale" },
+              }),
+            );
+          }
+          for (const providerTurn of snapshot.providerTurns ?? []) {
+            events.push(
+              yield* makeEvent({
+                type: "provider-turn.updated",
+                threadId: input.threadId,
+                driver: providerThread.driver,
+                providerInstanceId: providerThread.providerInstanceId,
+                occurredAt: now,
+                payload: providerTurn,
+              }),
+            );
+          }
+          if (cut !== undefined) {
+            // The turn's opening message stays: a step is never the user's own input.
+            const opening = cut.items[0]?.ordinal ?? cut.item.ordinal;
+            const fromOrdinal = Math.max(
+              Math.min(snapshot.cutFromOrdinal ?? cut.item.ordinal, cut.item.ordinal),
+              opening + 1,
+            );
+            events.push(
+              yield* makeEvent({
+                type: "run.updated",
+                threadId: input.threadId,
+                runId: cut.run.id,
+                ...(cut.run.rootNodeId === null ? {} : { nodeId: cut.run.rootNodeId }),
+                providerInstanceId: cut.run.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...cut.run,
+                  truncations: [
+                    ...(cut.run.truncations ?? []),
+                    {
+                      fromOrdinal,
+                      ...(keepLater &&
+                      snapshot.cutToOrdinal !== undefined &&
+                      snapshot.cutToOrdinal > fromOrdinal
+                        ? { toOrdinal: snapshot.cutToOrdinal }
+                        : {}),
+                      at: DateTime.formatIso(now),
+                    },
+                  ],
+                },
               }),
             );
           }
@@ -536,6 +715,21 @@ export const layer: Layer.Layer<
           yield* eventSink.write({ events });
         }),
       );
+      // Their sessions go after the thread no longer points at them.
+      for (const stale of context.staleProviderThreads) {
+        if (
+          stale.providerSessionId === null ||
+          stale.providerSessionId === providerThread.providerSessionId
+        )
+          continue;
+        yield* sessions
+          .detach({
+            providerSessionId: stale.providerSessionId,
+            threadId: input.threadId,
+            detail: STALE_AGENT_DETACH_REASON,
+          })
+          .pipe(Effect.ignore({ log: true }));
+      }
     });
 
     return CheckpointRollbackServiceV2.of({

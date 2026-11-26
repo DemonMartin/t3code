@@ -22,6 +22,7 @@ import {
   type ServerProviderSkill,
   type RunId,
   ThreadId,
+  type TurnItemId,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import { resolveWorkGroupScrollAnchor } from "@t3tools/client-runtime/work-log/scroll-anchor";
@@ -31,6 +32,7 @@ import { preserveReadingPosition } from "~/lib/preserveReadingPosition";
 import { useStableCallback } from "~/hooks/useStableCallback";
 
 const NOOP_USE_ARTIFACT_TEMPLATE = () => {};
+const NO_STEP_REWIND_INSTANCES: ReadonlySet<string> = new Set();
 const EMPTY_PENDING_APPROVALS: ReadonlyArray<PendingApproval> = [];
 const EMPTY_RESPONDING_REQUEST_IDS: TimelineRowSharedState["respondingRequestIds"] = [];
 
@@ -57,7 +59,7 @@ import {
 } from "@legendapp/list/react";
 import { type PendingApproval, type TimelineEntry } from "../../session-logic";
 import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
-import { type ChatFileAttachment, type TurnDiffSummary } from "../../types";
+import { type ChatFileAttachment, type ChatMessage, type TurnDiffSummary } from "../../types";
 import {
   ArrowRightIcon,
   BotIcon,
@@ -312,6 +314,15 @@ interface MessagesTimelineProps {
   threadStartCheckpointAvailable?: boolean;
   availableRevertTurnCounts?: ReadonlySet<number> | undefined;
   onRevertToTurnCount: (targetTurnCount: number, messageId: MessageId) => void;
+  /** Absent when the agent cannot rewind into a turn; steps then show no rewind or cut action. */
+  onRewindToStep?: (target: {
+    readonly itemId: TurnItemId;
+    readonly runId: RunId;
+    readonly only?: boolean;
+    readonly message?: ChatMessage;
+  }) => void;
+  /** The agents whose turns can be rewound into; another agent's turn shows no step actions. */
+  stepRewindInstanceIds?: ReadonlySet<string>;
   onUseArtifactTemplate?: (template: CodexArtifactTemplate) => void;
   onSendAppMessage?: (text: string) => Promise<void>;
   onRunShellCommand?: (command: string) => void;
@@ -415,6 +426,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
   threadStartCheckpointAvailable = false,
   availableRevertTurnCounts,
   onRevertToTurnCount,
+  onRewindToStep,
+  stepRewindInstanceIds = NO_STEP_REWIND_INSTANCES,
   onUseArtifactTemplate = NOOP_USE_ARTIFACT_TEMPLATE,
   onSendAppMessage,
   onRunShellCommand,
@@ -1146,6 +1159,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
     runs,
     activeThreadEnvironmentId,
     onRevertToTurnCount,
+    onRewindToStep,
+    stepRewindInstanceIds,
     onRunShellCommand,
     findActive,
     onImageExpand,

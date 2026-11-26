@@ -1,7 +1,8 @@
-import type {
-  OrchestrationV2ProjectedTurnItem,
-  OrchestrationV2Subagent,
-  OrchestrationV2ThreadProjection,
+import {
+  isOrchestrationV2RunItemTruncated,
+  type OrchestrationV2ProjectedTurnItem,
+  type OrchestrationV2Subagent,
+  type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import { isOrchestrationV2TurnItemVisible } from "@t3tools/shared/orchestrationV2Timeline";
 
@@ -105,6 +106,9 @@ export function mergeOlderHistoryIntoProjection(
   const rolledBackRuns = new Set(
     projection.runs.filter((run) => run.status === "rolled_back").map((run) => run.id),
   );
+  const cutRuns = new Map(
+    projection.runs.flatMap((run) => (run.truncations === undefined ? [] : [[run.id, run]])),
+  );
   const turnItemById = new Map(projection.turnItems.map((item) => [String(item.id), item]));
   const pageKeys = new Set<string>();
   const page: OrchestrationV2ProjectedTurnItem[] = [];
@@ -145,6 +149,9 @@ export function mergeOlderHistoryIntoProjection(
       }
       // A rollback can arrive before a history page for rows outside the loaded window.
       if (row.item.runId !== null && rolledBackRuns.has(row.item.runId)) continue;
+      // The same for a rewind into a run, which hides its later rows.
+      const cutRun = row.item.runId === null ? undefined : cutRuns.get(row.item.runId);
+      if (cutRun !== undefined && isOrchestrationV2RunItemTruncated(cutRun, row.item)) continue;
     }
     pageKeys.add(key);
     page.push(row);

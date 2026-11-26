@@ -36,6 +36,7 @@ import {
   reconcileOptimisticUserMessages,
 } from "./chat/optimisticUserMessages";
 import { useTimelineRewind } from "./chat/useTimelineRewind";
+import { StepRewindConfirmHost, useStepRewind } from "./chat/useStepRewind";
 import { useThreadLifecycle } from "./chat/useThreadLifecycle";
 import { useRightPanelActions } from "./chat/useRightPanelActions";
 import { type TerminalLaunchContext, useChatTerminalActions } from "./chat/useChatTerminalActions";
@@ -1500,6 +1501,16 @@ export default function ChatView(props: ChatViewProps) {
     canOperateThread &&
     conversationProviderStatus !== null &&
     conversationProviderStatus.supportsConversationRollback !== false;
+  // Each turn is rewound by the agent that ran it, which can be another than the current one.
+  const stepRewindInstanceIds = new Set(
+    canOperateThread
+      ? providerStatuses.flatMap((status) =>
+          status.supportsStepRollback === true && status.supportsConversationRollback !== false
+            ? [status.instanceId]
+            : [],
+        )
+      : [],
+  );
   const phase = derivePhase(activeRuntime);
   const serverThreadId = serverThread?.id;
   const serverThreadEnvironmentId = serverThread?.environmentId;
@@ -3147,6 +3158,23 @@ export default function ChatView(props: ChatViewProps) {
       composerDraftTarget,
       setThreadError,
     });
+  const { onConfirmStepRewindStable, onRewindToStepStable } = useStepRewind({
+    environmentId,
+    routeThreadRef,
+    routeThreadKey,
+    currentRouteThreadKeyRef,
+    serverProjection,
+    activeThread,
+    phase,
+    isSendBusy,
+    isRevertingCheckpoint,
+    activeEnvironmentUnavailable,
+    activeEnvironmentUnavailableLabel,
+    composerRef,
+    promptRef,
+    composerDraftTarget,
+    setThreadError,
+  });
   const onCompactContext = () => {
     if (compactDisabled) return;
     void sendStandaloneCommand("/compact", gt("Failed to compact context."));
@@ -3944,6 +3972,9 @@ export default function ChatView(props: ChatViewProps) {
                   threadStartCheckpointAvailable={threadStartCheckpointAvailable}
                   availableRevertTurnCounts={availableRevertTurnCounts}
                   onRevertToTurnCount={onRevertTimelineTurnStable}
+                  {...(stepRewindInstanceIds.size > 0
+                    ? { onRewindToStep: onRewindToStepStable, stepRewindInstanceIds }
+                    : {})}
                   onUseArtifactTemplate={insertArtifactTemplateStable}
                   onSendAppMessage={sendAppMessageStable}
                   isRevertingCheckpoint={isRevertingCheckpoint}
@@ -4521,6 +4552,7 @@ export default function ChatView(props: ChatViewProps) {
         worktreePath={activeThread?.worktreePath ?? null}
         onConfirm={onConfirmRevertStable}
       />
+      <StepRewindConfirmHost threadKey={routeThreadKey} onConfirm={onConfirmStepRewindStable} />
       {embedded ? null : <LinkPullRequestDialogHost />}
       <ThreadVisitWatermark threadRef={routeThreadRef} />
       <ExpandedImageDialogHost threadKey={routeThreadKey} />

@@ -40,7 +40,7 @@ import { registerThreadOverlay } from "./threadOverlayRetention";
  */
 type ThreadOverlayAtom<T> = Atom.Writable<{ readonly threadKey: string; readonly value: T } | null>;
 
-function makeThreadOverlayAtom<T>(label: string): ThreadOverlayAtom<T> {
+export function makeThreadOverlayAtom<T>(label: string): ThreadOverlayAtom<T> {
   const atom = Atom.make<{ readonly threadKey: string; readonly value: T } | null>(null).pipe(
     Atom.keepAlive,
     Atom.withLabel(`chat:${label}`),
@@ -52,11 +52,14 @@ function makeThreadOverlayAtom<T>(label: string): ThreadOverlayAtom<T> {
   return atom;
 }
 
-function closeThreadOverlay<T>(atom: ThreadOverlayAtom<T>): void {
+export function closeThreadOverlay<T>(atom: ThreadOverlayAtom<T>): void {
   appAtomRegistry.set(atom, null);
 }
 
-function useThreadOverlay<T>(atom: ThreadOverlayAtom<T>, threadKey: string | null): T | null {
+export function useThreadOverlay<T>(
+  atom: ThreadOverlayAtom<T>,
+  threadKey: string | null,
+): T | null {
   const entry = useAtomValue(atom);
   return threadKey !== null && entry?.threadKey === threadKey ? entry.value : null;
 }

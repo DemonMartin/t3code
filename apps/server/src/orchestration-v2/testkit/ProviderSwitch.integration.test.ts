@@ -2784,6 +2784,171 @@ describe("orchestration v2 provider switching", () => {
       ),
   );
 
+  it.live(
+    "a rewind to another agent's turn makes that agent the thread's again, and the other starts over",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const name = "rollback-across-agents";
+          const cwd = yield* checkpointWorkspace(name);
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const injectedHistory = yield* Ref.make<ReadonlyArray<unknown>>([]);
+          const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+            makeTestAdapter({
+              instanceId: CODEX_MODEL_SELECTION.instanceId,
+              driver: CODEX_DRIVER,
+              capabilities: CodexProviderCapabilitiesV2,
+              modelSelection: CODEX_MODEL_SELECTION,
+              responseByRunOrdinal: { 1: "noted", 3: "noted", 5: "noted" },
+              capturedTurns,
+              injectedHistory,
+              // Each native conversation gets its own id, as a provider's does.
+              nativeThreadGeneration: yield* Ref.make(0),
+              rollback: "truncates",
+            }),
+            makeTestAdapter({
+              instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              responseByRunOrdinal: { 2: "noted", 4: "noted" },
+              capturedTurns,
+              injectedHistory,
+              rollback: "truncates",
+            }),
+          ]);
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const run = Effect.fn("run")(function* (
+              ordinal: number,
+              text: string,
+              modelSelection: ModelSelection,
+            ) {
+              yield* orchestrator.dispatch({
+                type: "message.dispatch",
+                commandId: CommandId.make(`${name}:${ordinal}`),
+                threadId,
+                messageId: MessageId.make(`${name}:${ordinal}`),
+                createdBy: "user",
+                creationSource: "web",
+                text,
+                attachments: [],
+                modelSelection,
+                dispatchMode: { type: "start_immediately" },
+              });
+              yield* orchestrator.streamStoredEvents.pipe(
+                Stream.filter(
+                  ({ event }) =>
+                    event.type === "run.updated" &&
+                    event.payload.ordinal === ordinal &&
+                    (event.payload.status === "completed" || event.payload.status === "failed"),
+                ),
+                Stream.runHead,
+              );
+              yield* worker.drain();
+              const turns = yield* Ref.get(capturedTurns);
+              return turns.at(-1)!;
+            });
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              commandId: CommandId.make(`${name}:create`),
+              threadId,
+              projectId,
+              createdBy: "user",
+              creationSource: "web",
+              title: "Across agents",
+              modelSelection: CODEX_MODEL_SELECTION,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+            });
+            const first = yield* run(1, "My favourite colour is teal.", CODEX_MODEL_SELECTION);
+            const claudeTurn = yield* run(
+              2,
+              "My favourite animal is an otter.",
+              CLAUDE_MODEL_SELECTION,
+            );
+            yield* run(3, "My dog is called Rex.", CODEX_MODEL_SELECTION);
+
+            const before = yield* orchestrator.getThreadProjection(threadId);
+            const claudeCheckpoint = before.checkpoints.find(
+              (checkpoint) => checkpoint.appRunOrdinal === 2 && checkpoint.status === "ready",
+            );
+            if (claudeCheckpoint === undefined) {
+              return yield* Effect.die("Expected a checkpoint after Claude's turn.");
+            }
+            yield* orchestrator.dispatch({
+              type: "checkpoint.rollback",
+              commandId: CommandId.make(`${name}:rollback`),
+              threadId,
+              scopeId: claudeCheckpoint.scopeId,
+              checkpointId: claudeCheckpoint.id,
+              restoreFiles: false,
+            });
+            yield* orchestrator.streamStoredEvents.pipe(
+              Stream.filter(
+                ({ event }) =>
+                  (event.type === "run.updated" &&
+                    event.payload.ordinal === 3 &&
+                    event.payload.status === "rolled_back") ||
+                  (event.type === "thread.metadata-updated" &&
+                    event.payload.rollbackFailure != null),
+              ),
+              Stream.runHead,
+            );
+            yield* worker.drain();
+
+            const after = yield* orchestrator.getThreadProjection(threadId);
+            assert.isNull(after.thread.rollbackFailure ?? null);
+            assert.deepEqual(after.thread.modelSelection, CLAUDE_MODEL_SELECTION);
+            assert.equal(after.thread.activeProviderThreadId, claudeTurn.providerThreadId);
+            assert.deepEqual(
+              after.runs.map((candidate) => candidate.status),
+              ["completed", "completed", "rolled_back"],
+            );
+
+            // Claude continues its own conversation: nothing to hand over, and no word of Rex.
+            const historyBeforeClaude = (yield* Ref.get(injectedHistory)).length;
+            const resumed = yield* run(4, "What is my dog called?", CLAUDE_MODEL_SELECTION);
+            assert.equal(resumed.providerThreadId, claudeTurn.providerThreadId);
+            assert.equal(resumed.nativeThreadId, claudeTurn.nativeThreadId);
+            const toClaude =
+              resumed.text +
+              (yield* encodeJson((yield* Ref.get(injectedHistory)).slice(historyBeforeClaude)));
+            assert.notInclude(toClaude, "Rex");
+
+            // Codex's conversation still held Rex, so it starts over from what is left.
+            const historyBeforeCodex = (yield* Ref.get(injectedHistory)).length;
+            const back = yield* run(5, "What do you know about me?", CODEX_MODEL_SELECTION);
+            assert.equal(back.providerThreadId, first.providerThreadId);
+            assert.notEqual(back.nativeThreadId, first.nativeThreadId);
+            const toCodex =
+              back.text +
+              (yield* encodeJson((yield* Ref.get(injectedHistory)).slice(historyBeforeCodex)));
+            assert.include(toCodex, "teal");
+            assert.include(toCodex, "otter");
+            assert.notInclude(toCodex, "Rex");
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                {
+                  name,
+                  runtimePolicyOverride: {
+                    cwd,
+                    approvalPolicy: "never",
+                    sandboxPolicy: { type: "readOnly" },
+                  },
+                },
+                layerRegistry,
+              ),
+            ),
+          );
+        }),
+      ),
+  );
+
   it.live.each([
     ["background work", new ClaudeBackgroundWorkBlocksQueryReplacementError()],
     ["an unreadable append file", new ClaudeAppendSystemPromptFileError({ path: "missing.md" })],

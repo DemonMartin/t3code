@@ -14,6 +14,7 @@ import {
   formatSearchToolLabel,
 } from "@t3tools/shared/toolActivity";
 import { field, text } from "../unknownField.ts";
+import { rollbackClaudeStep } from "./ClaudeStepCut.ts";
 import { mergeWorkflowAgentMetadata, type WorkflowAgentMetadata } from "../workflowAgentAnswers.ts";
 import {
   initialWorkflowAgentTranscriptCursor,
@@ -666,6 +667,8 @@ export const ClaudeProviderCapabilitiesV2 = {
     canCreateEmptyThread: true,
     canReadThreadSnapshot: false,
     canRollbackThread: true,
+    canRollbackWithinTurn: true,
+    canCutStep: true,
     canForkThread: true,
     canForkFromTurn: true,
     canForkWhileSourceRunning: true,
@@ -976,6 +979,14 @@ export interface ClaudeAgentSdkQueryRunnerShape {
     ForkSessionResult & { readonly headMessageId?: string },
     ClaudeAgentSdkQueryRunnerError
   >;
+  /**
+   * A session's transcript entries, oldest first, wherever its project folder is now. A runner
+   * without it cannot rewind into a turn.
+   */
+  readonly sessionMessages?: (input: {
+    readonly sessionId: string;
+    readonly environment: NodeJS.ProcessEnv;
+  }) => Effect.Effect<ReadonlyArray<ClaudeHistoryMessage>, ClaudeAgentSdkQueryRunnerError>;
   readonly subagentLaunchToolUseId: (
     input: ClaudeAgentSdkSubagentLookupInput,
   ) => Effect.Effect<string | null, ClaudeAgentSdkQueryRunnerError>;
@@ -1454,7 +1465,11 @@ const decodeClaudeHistoryMessages = Schema.decodeUnknownEffect(
       Schema.Struct({
         type: Schema.String,
         uuid: Schema.String,
-        message: Schema.Struct({ content: Schema.Unknown, model: Schema.optional(Schema.Unknown) }),
+        message: Schema.Struct({
+          content: Schema.Unknown,
+          model: Schema.optional(Schema.Unknown),
+          id: Schema.optional(Schema.Unknown),
+        }),
       }),
     ),
   ),
@@ -1463,7 +1478,7 @@ const decodeClaudeHistoryMessages = Schema.decodeUnknownEffect(
 interface ClaudeHistoryMessage {
   readonly type: string;
   readonly uuid: string;
-  readonly message: { readonly content: unknown; readonly model?: unknown };
+  readonly message: { readonly content: unknown; readonly model?: unknown; readonly id?: unknown };
 }
 
 // The placeholder reply the CLI records for a failed request.
@@ -2351,6 +2366,19 @@ export const layerQueryRunner: Layer.Layer<
           : result.headMessageId;
         return headMessageId === undefined ? result : { ...result, headMessageId };
       }),
+      sessionMessages: Effect.fn("ClaudeAgentSdkQueryRunner.sessionMessages")(
+        function* (input: { readonly sessionId: string; readonly environment: NodeJS.ProcessEnv }) {
+          // In the worker: the SDK reads the Claude home from the process environment.
+          const transcript = yield* runClaudeWorker({ method: "getSessionMessages", ...input });
+          return yield* decodeClaudeHistoryMessages(transcript);
+        },
+        (effect) =>
+          effect.pipe(
+            Effect.mapError((cause) => queryRunnerError(cause, "getSessionMessages")),
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Effect.provideService(Path.Path, path),
+          ),
+      ),
       subagentLaunchToolUseId: Effect.fn("ClaudeAgentSdkQueryRunner.subagentLaunchToolUseId")(
         function* (input: ClaudeAgentSdkSubagentLookupInput) {
           const protocolLogger = makeClaudeAgentSdkProtocolLogger({
@@ -15894,6 +15922,24 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               // The rewound history may no longer hold the turns that carried app notes.
               deliveredAppContext.set(nativeThreadId, new Map());
               const now = yield* DateTime.now;
+              // A rewind to a step, or a cut of one: see ClaudeStepCut.
+              const stepCut = yield* rollbackClaudeStep({
+                rollback: rollbackInput,
+                providerSessionId: input.providerSessionId,
+                now,
+                turnCursor: claudeTurnCursor,
+                fileSystem,
+                transcriptPath: locateClaudeTranscript(nativeThreadId),
+                ...(queryRunner.sessionMessages === undefined
+                  ? {}
+                  : {
+                      sessionMessages: queryRunner.sessionMessages({
+                        sessionId: nativeThreadId,
+                        environment: adapterOptions.environment,
+                      }),
+                    }),
+              });
+              if (stepCut !== null) return stepCut;
               const resumeSessionAt = yield* resolveClaudeRollbackResumeSessionAt(rollbackInput);
 
               if (rollbackInput.target.type === "thread_start" && resumeSessionAt === null) {

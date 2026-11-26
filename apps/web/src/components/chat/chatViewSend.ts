@@ -4,6 +4,7 @@ import {
   type ModelSelection,
   type ScopedThreadRef,
   type ThreadId,
+  type TurnItemId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
 } from "@t3tools/contracts";
 import {
@@ -185,10 +186,16 @@ export async function rewindToMessage(input: {
       threadId: ThreadId;
       turnCount: number;
       restoreFiles: boolean;
+      fromItemId?: TurnItemId;
       checkpointId?: string;
       scopeId?: string;
     };
   }) => Promise<AtomCommandResult<unknown, unknown>>;
+  /** The message sits inside its turn (a steer): the rewind cuts the turn there. */
+  readonly step?: {
+    readonly itemId: TurnItemId;
+    readonly wait: (commandId: CommandId, send: () => Promise<void>) => Promise<void>;
+  };
 }): Promise<
   | { readonly error: string; readonly prompt?: never }
   | { readonly error: null; readonly prompt: string }
@@ -217,26 +224,26 @@ export async function rewindToMessage(input: {
       );
     }
     const commandId = CommandId.make(randomUUID());
-    const unrestored = await waitForRevertedMessage(
-      input.routeThreadRef,
-      input.turnCount,
-      commandId,
-      async () => {
-        const result = await input.revertThreadCheckpoint({
-          environmentId,
-          input: {
-            commandId,
-            threadId: input.threadId,
-            turnCount: input.turnCount,
-            restoreFiles: input.restoreFiles,
-            ...(input.checkpoint === undefined
-              ? {}
-              : { checkpointId: input.checkpoint.id, scopeId: input.checkpoint.scopeId }),
-          },
-        });
-        if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-      },
-    );
+    const send = async () => {
+      const result = await input.revertThreadCheckpoint({
+        environmentId,
+        input: {
+          commandId,
+          threadId: input.threadId,
+          turnCount: input.turnCount,
+          restoreFiles: input.restoreFiles,
+          ...(input.step === undefined ? {} : { fromItemId: input.step.itemId }),
+          ...(input.checkpoint === undefined
+            ? {}
+            : { checkpointId: input.checkpoint.id, scopeId: input.checkpoint.scopeId }),
+        },
+      });
+      if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+    };
+    const unrestored =
+      input.step === undefined
+        ? await waitForRevertedMessage(input.routeThreadRef, input.turnCount, commandId, send)
+        : await input.step.wait(commandId, send).then(() => []);
     if (unrestored.length > 0) {
       toastManager.add({
         type: "warning",

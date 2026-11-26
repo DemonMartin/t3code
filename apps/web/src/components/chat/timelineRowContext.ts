@@ -25,7 +25,7 @@ import { useEffect, useRef, createContext, type MouseEvent, type ReactNode } fro
 import { type LegendListRef } from "@legendapp/list/react";
 import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
 import type { PendingApproval } from "../../session-logic";
-import { type ChatFileAttachment } from "../../types";
+import { type ChatFileAttachment, type ChatMessage } from "../../types";
 import { type ExpandedImageItem, ExpandedImagePreview } from "./ExpandedImagePreview";
 import { type AssistantCitationTarget } from "./AssistantCitationSource";
 import { type MessagesTimelineRow, type WorkGroupScrollAnchor } from "./MessagesTimeline.logic";
@@ -67,6 +67,20 @@ export interface TimelineRowSharedState {
   runs: ReadonlyArray<HandoffTimelineRun>;
   activeThreadEnvironmentId: EnvironmentId;
   onRevertToTurnCount: (targetTurnCount: number, messageId: MessageId) => void;
+  /**
+   * Absent hides "Rewind to here" and "Cut out" on steps: the agent cannot change a turn's
+   * history. With `only`, just that step leaves and later ones stay.
+   */
+  onRewindToStep:
+    | ((target: {
+        readonly itemId: TurnItemId;
+        readonly runId: RunId;
+        readonly only?: boolean;
+        readonly message?: ChatMessage;
+      }) => void)
+    | undefined;
+  /** The agents (provider instances) whose turns can be rewound into or cut. */
+  stepRewindInstanceIds: ReadonlySet<string>;
   onUseArtifactTemplate: (template: CodexArtifactTemplate) => void;
   onSendAppMessage: ((text: string) => Promise<void>) | undefined;
   onAppFullscreenChange: (rowId: string, fullscreen: boolean) => void;
