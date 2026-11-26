@@ -452,6 +452,10 @@ const mcpRules = (mcpServerName: string | null): ReadonlyArray<Rule> =>
         { action: `${mcpServerName}_*`, resource: "*", effect: "allow" },
       ];
 
+// OpenCode's own browser tools attach only in its desktop app, so here they never work:
+// denied, the agent reaches for T3's preview tools instead.
+const browserRules: ReadonlyArray<Rule> = [{ action: "browser", resource: "*", effect: "deny" }];
+
 const sessionRules = (
   policy: RulesPolicy,
   paths: ReadonlyArray<Rule>,
@@ -478,6 +482,7 @@ const sessionRules = (
   // Plan edits are re-allowed only for plan paths; free-tier sessions refuse denied shell/read.
   ...(policy.interactionMode === "plan" ? [rule("edit", "deny")] : []),
   ...paths,
+  ...browserRules,
   ...mcpRules(mcpServerName),
 ];
 
