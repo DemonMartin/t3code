@@ -74,6 +74,26 @@ export const ProviderAdapterV2RuntimePolicy = Schema.Struct({
    */
   maxRuntimeMode: Schema.optional(RuntimeMode),
   workspace: Schema.optional(ProviderAdapterV2RuntimeWorkspace),
+  /** Present while the refusal-recovery master toggle is on for this provider. */
+  refusal: Schema.optional(
+    Schema.Struct({
+      provider: Schema.Literals(["claude", "opencode"]),
+      mode: Schema.Literals(["amend", "replace", "off"]),
+      /** Absent while the prompt layer or this provider's prompt switch is off. */
+      prompt: Schema.optional(Schema.String),
+      detect: Schema.Boolean,
+      textHeuristics: Schema.Boolean,
+      repair: Schema.Boolean,
+      /** Strip refusal triggers out of the outbound prompt. Runs with every other layer off. */
+      strip: Schema.Boolean,
+      /** Extra trigger patterns from settings, appended to the shared list. */
+      stripPatterns: Schema.optional(Schema.Array(Schema.String)),
+      /** Wrap a multi-bucket task body in the config envelope. */
+      envelope: Schema.Boolean,
+      /** Repairs already tried on this thread; the notice carries the number that just ran. */
+      rung: Schema.Number,
+    }),
+  ),
 });
 export type ProviderAdapterV2RuntimePolicy = typeof ProviderAdapterV2RuntimePolicy.Type;
 

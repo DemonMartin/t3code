@@ -83,6 +83,8 @@ export function V2LifecycleRow(props: {
     environmentId?: EnvironmentId,
     intent?: SideThreadOpenIntent,
   ) => void;
+  /** Opens the model picker; absent where there is no composer, as in the guest view. */
+  readonly onSwitchProvider?: (() => void) | undefined;
 }) {
   const { item } = props;
   const gt = useGT();
@@ -97,7 +99,17 @@ export function V2LifecycleRow(props: {
     );
   }
   if (item.type === "system_notice") {
-    return <TimelineSystemDivider label={item.message} />;
+    const parked = item.refusalParked === true;
+    const switchProvider = parked ? props.onSwitchProvider : undefined;
+    return (
+      <TimelineSystemDivider
+        label={item.message}
+        tone={parked ? "danger" : "neutral"}
+        {...(switchProvider === undefined
+          ? {}
+          : { actionLabel: gt("Switch provider"), onAction: switchProvider })}
+      />
+    );
   }
   if (item.type === "handoff") {
     return (

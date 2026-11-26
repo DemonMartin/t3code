@@ -461,6 +461,35 @@ export const OrchestrationV2LimitRecovery = Schema.Struct({
 });
 export type OrchestrationV2LimitRecovery = typeof OrchestrationV2LimitRecovery.Type;
 
+/**
+ * Where refusal recovery stands on a thread. The run, class and bucket name the last refusal seen;
+ * `rung` counts the repairs already tried, so a thread past the third parks instead of looping.
+ * A handoff records the provider it pinned to and the one it came from, so the pin can expire.
+ */
+export const OrchestrationV2RefusalRecovery = Schema.Struct({
+  runId: RunId,
+  class: Schema.Literals(["trigger", "classifier", "judgment"]),
+  bucket: Schema.NullOr(Schema.String),
+  category: Schema.NullOr(Schema.String),
+  rung: NonNegativeInt,
+  outcome: Schema.String,
+  handoff: Schema.optional(Schema.NullOr(ModelSelection)),
+  /** The selection to go back to when the pin expires. */
+  previous: Schema.optional(Schema.NullOr(ModelSelection)),
+  pinnedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  parkedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+});
+export type OrchestrationV2RefusalRecovery = typeof OrchestrationV2RefusalRecovery.Type;
+
+/** What a refusal notice tells the worker; `message` carries the sentence people read. */
+export const OrchestrationV2RefusalNotice = Schema.Struct({
+  class: Schema.Literals(["trigger", "classifier", "judgment"]),
+  bucket: Schema.NullOr(Schema.String),
+  signal: Schema.Literals(["structured", "text"]),
+  rung: NonNegativeInt,
+});
+export type OrchestrationV2RefusalNotice = typeof OrchestrationV2RefusalNotice.Type;
+
 export const OrchestrationV2LimitRecoveryUpdate = Schema.Struct({
   runId: RunId,
   resetAt: IsoDateTime,
@@ -549,6 +578,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
+  refusalRecovery: Schema.optional(Schema.NullOr(OrchestrationV2RefusalRecovery)),
   guestShare: Schema.optional(Schema.NullOr(ThreadGuestShare)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2088,6 +2118,10 @@ export const OrchestrationV2TurnItem = Schema.Union([
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("system_notice"),
     message: Schema.String,
+    /** Set on a notice that reports a provider refusal; the recovery worker consumes it. */
+    refusal: Schema.optional(OrchestrationV2RefusalNotice),
+    /** Set on the notice that ends recovery, so the timeline offers a way on. */
+    refusalParked: Schema.optional(Schema.Boolean),
     level: Schema.optional(OrchestrationV2SystemNoticeLevel),
     mcpSignIn: Schema.optional(OrchestrationV2McpSignIn),
     /** Set on a note that a setting of the thread's environment changed; shown like a model change. */
@@ -2521,6 +2555,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
+  refusalRecovery: Schema.optional(Schema.NullOr(OrchestrationV2RefusalRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
@@ -2988,6 +3023,10 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("system_notice"),
     message: Schema.String,
+    /** Set on a notice that reports a provider refusal; the recovery worker consumes it. */
+    refusal: Schema.optional(OrchestrationV2RefusalNotice),
+    /** Set on the notice that ends recovery, so the timeline offers a way on. */
+    refusalParked: Schema.optional(Schema.Boolean),
     level: Schema.optional(OrchestrationV2SystemNoticeLevel),
     mcpSignIn: Schema.optional(OrchestrationV2McpSignIn),
     /** Set on a note that a setting of the thread's environment changed; shown like a model change. */
@@ -3542,6 +3581,8 @@ export const OrchestrationV2Command = Schema.Union([
     /** Reject unless no message or run has landed on this thread. */
     expectedEmpty: Schema.optional(Schema.Boolean),
     limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecoveryUpdate)),
+    /** Replaces the stored refusal-recovery state; null clears it. */
+    refusalRecovery: Schema.optional(Schema.NullOr(OrchestrationV2RefusalRecovery)),
     /** Link (object) or unlink (null) a pull request; absent leaves it unchanged. */
     linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   }),
@@ -3811,6 +3852,8 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     text: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+    /** Refusal recovery gave up here; the timeline offers to switch provider. */
+    refusalParked: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback"),

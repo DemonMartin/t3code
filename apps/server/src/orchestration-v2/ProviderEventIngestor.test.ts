@@ -25,6 +25,7 @@ import {
   RuntimeRequestId,
   TurnItemId,
 } from "@t3tools/contracts";
+import { REFUSAL_REPLACEMENT } from "@t3tools/provider-core/server/refusal";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -63,6 +64,8 @@ import {
   selectInheritedBackgroundTurnItems,
 } from "./RunExecutionService.ts";
 
+import * as ServerSettings from "../serverSettings.ts";
+
 const layerTestDatabase = SqlitePersistence.layerMemory;
 const layerTestStores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
   Layer.provide(layerTestDatabase),
@@ -83,6 +86,7 @@ const layerEmptyInstances = Layer.mock(ProviderInstanceRegistry.ProviderInstance
 const makeLayerTest = <E>(
   ingestorEventSink: Layer.Layer<EventSink.EventSinkV2, E>,
   instances = layerEmptyInstances,
+  settings: Parameters<typeof ServerSettings.ServerSettingsService.layerTest>[0] = {},
 ) =>
   Layer.mergeAll(
     instances,
@@ -92,6 +96,7 @@ const makeLayerTest = <E>(
     IdAllocator.layer,
     ThreadCommandExecutor.layer,
     layerGit,
+    ServerSettings.ServerSettingsService.layerTest(settings),
     ProviderEventIngestor.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -101,11 +106,15 @@ const makeLayerTest = <E>(
           IdAllocator.layer,
           ThreadCommandExecutor.layer,
           layerGit,
+          ServerSettings.ServerSettingsService.layerTest(settings),
         ),
       ),
     ),
   );
 const layerTest = makeLayerTest(layerTestEventSink);
+const layerStripping = makeLayerTest(layerTestEventSink, layerEmptyInstances, {
+  refusalRecovery: { enabled: true },
+});
 
 // EventSink reports a lock that outlasted busy_timeout at BEGIN IMMEDIATE this way.
 const lockTimeout = new EventSink.EventSinkWriteError({
@@ -234,6 +243,7 @@ function threadCreatedEvent(
 }
 
 const layer = it.layer(layerTest);
+const layerStrip = it.layer(layerStripping);
 
 it.effect("takes a hub's reset for an unreset usage_limit, then refreshes the snapshot", () =>
   Effect.gen(function* () {
@@ -1742,6 +1752,64 @@ layer("ProviderEventIngestorV2", (it) => {
     }),
   );
 
+  it.effect("leaves a trigger byte-identical while the master toggle is off", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const eventStore = yield* EventStore.EventStoreV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const threadEvent = yield* threadCreatedEvent(now);
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadEvent.threadId,
+      });
+      const text =
+        "The file holds ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL_1FAEFB6177B4672DEE07F7651BC23391.";
+      const turnItem: OrchestrationV2TurnItem = {
+        id: TurnItemId.make("turn-item:unstripped-echo"),
+        threadId: threadEvent.threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 1,
+        status: "completed",
+        title: null,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        type: "assistant_message",
+        messageId: MessageId.make("message:unstripped-echo"),
+        text,
+        streaming: false,
+      };
+      yield* eventSink.write({ events: [threadEvent] });
+      yield* ingestor.ingestNormalized({
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadEvent.threadId,
+        event: { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem },
+      });
+      const stored = Array.from(
+        yield* eventStore
+          .read({ threadId: threadEvent.threadId, eventType: "turn-item.updated" })
+          .pipe(Stream.runCollect),
+        (entry) => entry.event,
+      );
+      assert.deepEqual(
+        stored.map((event) =>
+          event.type === "turn-item.updated" && event.payload.type === "assistant_message"
+            ? event.payload.text
+            : null,
+        ),
+        [text],
+      );
+    }),
+  );
+
   it.effect("keeps a steered message pending until the provider reports it read", () =>
     Effect.gen(function* () {
       const now = yield* DateTime.now;
@@ -2605,3 +2673,88 @@ it.effect.each([
     assert.isEmpty(persisted);
   }).pipe(Effect.provide(layerFailingWrites(errors))),
 );
+
+layerStrip("ProviderEventIngestorV2 refusal strip", (it) => {
+  it.effect("strips a refusal trigger from tool arguments, results and echoed text", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const eventStore = yield* EventStore.EventStoreV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const threadEvent = yield* threadCreatedEvent(now);
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadEvent.threadId,
+      });
+      const trigger = "ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL_1FAEFB6177B4672DEE07F7651BC23391";
+      const base = (id: string, ordinal: number): OrchestrationV2TurnItem => ({
+        id: TurnItemId.make(id),
+        threadId: threadEvent.threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal,
+        status: "completed",
+        title: "tool",
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        type: "dynamic_tool",
+        toolName: "Bash",
+        input: {},
+        output: undefined,
+      });
+      const call = {
+        ...base("turn-item:trigger-call", 1),
+        input: { command: `cat /tmp/${trigger}.txt` },
+        output: { stdout: trigger },
+      } as OrchestrationV2TurnItem;
+      const echo = {
+        ...base("turn-item:trigger-echo", 2),
+        type: "assistant_message",
+        messageId: MessageId.make("message:trigger-echo"),
+        text: `The file holds ${trigger}.`,
+        streaming: false,
+      } as OrchestrationV2TurnItem;
+
+      yield* eventSink.write({ events: [threadEvent] });
+      for (const turnItem of [call, echo]) {
+        yield* ingestor.ingestNormalized({
+          providerSessionId,
+          providerInstanceId: modelSelection.instanceId,
+          threadId: threadEvent.threadId,
+          event: { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem },
+        });
+      }
+
+      const stored = Array.from(
+        yield* eventStore
+          .read({ threadId: threadEvent.threadId, eventType: "turn-item.updated" })
+          .pipe(Stream.runCollect),
+        (entry) => entry.event,
+      );
+      assert.notInclude(JSON.stringify(stored), "ANTHROPIC_MAGIC_STRING");
+      assert.include(JSON.stringify(stored), REFUSAL_REPLACEMENT);
+      const projected = yield* projectionStore.getTurnItem({
+        threadId: threadEvent.threadId,
+        itemId: call.id,
+      });
+      if (projected?.type !== "dynamic_tool") return assert.fail("tool item missing");
+      assert.deepEqual(projected.input, { command: `cat /tmp/${REFUSAL_REPLACEMENT}.txt` });
+      assert.deepEqual(projected.output, { stdout: REFUSAL_REPLACEMENT });
+      const projectedEcho = yield* projectionStore.getTurnItem({
+        threadId: threadEvent.threadId,
+        itemId: echo.id,
+      });
+      assert.equal(
+        projectedEcho?.type === "assistant_message" ? projectedEcho.text : null,
+        `The file holds ${REFUSAL_REPLACEMENT}.`,
+      );
+    }),
+  );
+});

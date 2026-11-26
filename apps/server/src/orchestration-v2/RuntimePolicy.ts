@@ -5,7 +5,9 @@ import {
   OrchestrationV2AppThread,
   ProjectId,
   ProviderInstanceId,
+  type RefusalRecoverySettings,
   RuntimeMode,
+  ServerSettingsError,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -16,6 +18,7 @@ import * as Schema from "effect/Schema";
 
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { refusalPreamble, refusalProviderForInstance } from "@t3tools/provider-core/server/refusal";
 import * as ServerSettings from "../serverSettings.ts";
 import * as WorkspaceFolders from "../workspace/WorkspaceFolders.ts";
 import * as ProjectStore from "./ProjectStore.ts";
@@ -54,9 +57,45 @@ export class RuntimePolicyAboveCeilingError extends Schema.TaggedError<RuntimePo
 
 export const isRuntimePolicyAboveCeilingError = Schema.is(RuntimePolicyAboveCeilingError);
 
+type RefusalRuntimePolicy = NonNullable<ProviderAdapter.ProviderAdapterV2RuntimePolicy["refusal"]>;
+
+/**
+ * The refusal preamble for this turn, or null when the master toggle, the prompt layer or the
+ * provider's own switch is off. Built once per turn; nothing is attached otherwise, so an off
+ * install sends exactly what it sent before.
+ */
+function refusalPolicyFor(
+  preferences: RefusalRecoverySettings,
+  instanceId: string,
+  rung = 0,
+): RefusalRuntimePolicy | null {
+  const provider = refusalProviderForInstance(instanceId);
+  if (provider === null || !preferences.enabled) return null;
+  const override = preferences.providers[provider];
+  if (override?.enabled === false) return null;
+  const mode = preferences.promptOverride.mode;
+  const promptOn =
+    preferences.promptOverride.enabled && override?.promptOverride !== false && mode !== "off";
+  const detect = preferences.detection.enabled && override?.detection !== false;
+  const strip = preferences.strip.enabled && override?.strip !== false;
+  return {
+    provider,
+    mode,
+    ...(promptOn ? { prompt: refusalPreamble(provider, mode) } : {}),
+    detect,
+    textHeuristics: detect && preferences.detection.textHeuristics,
+    repair: preferences.repair.enabled && override?.repair !== false,
+    strip,
+    ...(strip ? { stripPatterns: preferences.strip.patterns } : {}),
+    envelope: preferences.envelope.enabled && override?.envelope !== false,
+    rung,
+  };
+}
+
 export const RuntimePolicyV2Error = Schema.Union([
   RuntimePolicyResolveError,
   RuntimePolicyAboveCeilingError,
+  ServerSettingsError,
 ]);
 export type RuntimePolicyV2Error = typeof RuntimePolicyV2Error.Type;
 
@@ -142,7 +181,8 @@ export const layerFromProjectStore: Layer.Layer<
     const workspaceFolders = yield* WorkspaceFolders.WorkspaceFolders;
     const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
     // The same ceiling the orchestrator enforces, fixed for the server's life.
-    const { managedPolicy } = yield* ServerSettings.ServerSettingsService;
+    const settings = yield* ServerSettings.ServerSettingsService;
+    const { managedPolicy } = settings;
     const maxRuntimeMode = managedPolicy?.limits?.maxRuntimeMode;
     return RuntimePolicyV2.of({
       resolve: Effect.fn("RuntimePolicyV2.resolve")(function* (input) {
@@ -190,12 +230,18 @@ export const layerFromProjectStore: Layer.Layer<
               ),
             ),
           );
+        const refusal = refusalPolicyFor(
+          (yield* settings.getSettings).refusalRecovery,
+          input.modelSelection.instanceId,
+          input.thread.refusalRecovery?.rung ?? 0,
+        );
         return ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
           runtimeMode: providerRuntimeMode(input.thread.runtimeMode, supportedRuntimeModes),
           interactionMode: input.thread.interactionMode,
           cwd,
           ...(maxRuntimeMode === undefined ? {} : { maxRuntimeMode }),
           ...(workspace === undefined || workspace.folders.length === 0 ? {} : { workspace }),
+          ...(refusal === null ? {} : { refusal }),
         });
       }),
     });

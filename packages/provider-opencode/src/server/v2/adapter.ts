@@ -97,6 +97,13 @@ import {
   makeProviderRetryTurnItem,
 } from "@t3tools/provider-core/server/failure";
 import {
+  refusalAdapterForDriver,
+  refusalPromptFor,
+  refusalLogLine,
+  refusalMarkerFor,
+  REFUSAL_NOTICE_TITLE,
+} from "@t3tools/provider-core/server/refusal";
+import {
   makeSubagentChildThread,
   makeSubagentConversationArtifacts,
   subagentThreadTitle,
@@ -238,7 +245,7 @@ interface TurnOwner {
   readonly runOrdinal: number;
   readonly rootNodeId: ProviderAdapter.ProviderAdapterV2TurnInput["rootNodeId"];
   readonly modelSelection: ModelSelection;
-  readonly runtimePolicy: Pick<ProviderAdapter.ProviderAdapterV2RuntimePolicy, "cwd">;
+  readonly runtimePolicy: Pick<ProviderAdapter.ProviderAdapterV2RuntimePolicy, "cwd" | "refusal">;
 }
 
 interface ActiveTurn {
@@ -1219,6 +1226,55 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           completedAt,
         },
       });
+
+    /**
+     * Layer 4 on a provider without a structured signal. Runs only once a turn completed: the
+     * notice is the marker the repair worker reads, and it carries the matched span for the log.
+     */
+    const emitRefusalNotice = Effect.fnUntraced(function* (
+      state: ThreadState,
+      turn: ActiveTurn,
+      terminal: TurnTerminal,
+    ) {
+      // Detection reports a refusal even when recovery is off; the worker decides the rest.
+      const policy = turn.input.runtimePolicy.refusal;
+      if (terminal.status !== "completed") return;
+      const adapter = refusalAdapterForDriver(driver);
+      if (adapter === null) return;
+      const marker = refusalMarkerFor({
+        adapter,
+        text: turn.answer ?? "",
+        hadToolUse: turn.tools.size > 0,
+        detect: policy?.detect !== false,
+        textHeuristics: policy?.textHeuristics !== false,
+        rung: policy?.rung ?? 0,
+      });
+      if (marker === null) return;
+      const now = yield* DateTime.now;
+      const nativeId = `refusal:${turn.providerTurn.id}`;
+      yield* emit({
+        type: "turn_item.updated",
+        driver,
+        turnItem: {
+          ...itemBase(state, turn, nativeId, "completed", now, now, now),
+          type: "system_notice",
+          title: REFUSAL_NOTICE_TITLE,
+          message: marker.text,
+          refusal: marker.notice,
+        },
+      });
+      yield* Effect.logInfo(
+        refusalLogLine({
+          provider: adapter.kind,
+          class: marker.notice.class,
+          bucket: marker.notice.bucket,
+          rung: policy?.rung ?? 0,
+          model: turn.input.modelSelection.model,
+          ...(marker.span === undefined ? {} : { span: marker.span }),
+          outcome: "detected",
+        }),
+      );
+    });
 
     const emitText = Effect.fnUntraced(function* (
       state: ThreadState,
@@ -2474,6 +2530,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         terminal.status,
         terminal.status === "failed" ? terminal.failure : undefined,
       );
+      yield* emitRefusalNotice(state, turn, terminal);
       const window = windowOf(turn.input.runtimePolicy.cwd, turn.input.modelSelection.model);
       const lastStep = turn.lastStep;
       yield* emitProviderTurn(turn, {
@@ -4508,6 +4565,8 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           model: turnInput.modelSelection.model,
           runtimePolicy: turnInput.runtimePolicy,
         }),
+        // Refusal recovery's real system-prompt channel: session instructions, not a user turn.
+        turnInput.runtimePolicy.refusal?.prompt,
         t3OrchestrationSystemPrompt(mcpAvailable, mcpSession?.capabilities?.has("device") === true),
         mcpAvailable
           ? "To wait for a background shell you started (tests, a build), call `t3_background_wait` with its shell ID before you end your turn. Do not mark work you leave running, or PRs."
@@ -4858,7 +4917,9 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       }
       const skills = yield* skillsMentioned(location, text);
       const files = yield* promptFiles(turnInput.message.attachments);
-      const messageText = turnInput.resume ? "" : yield* promptText(turnInput);
+      const messageText = turnInput.resume
+        ? ""
+        : refusalPromptFor(turnInput.runtimePolicy.refusal, yield* promptText(turnInput));
       if (!sending()) return;
       return yield* client.session
         .prompt({

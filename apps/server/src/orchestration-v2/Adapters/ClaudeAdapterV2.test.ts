@@ -3773,6 +3773,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     readonly isError?: boolean;
     readonly errors?: ReadonlyArray<string>;
     readonly apiErrorStatus?: number;
+    readonly stopReason?: SDKResultMessage["stop_reason"];
     // null omits the field, as the CLI does on a zero-turn result.
     readonly terminalReason?: SDKResultMessage["terminal_reason"] | null;
     readonly usage?: {
@@ -3791,7 +3792,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       is_error: input.isError ?? false,
       num_turns: input.numTurns ?? 1,
       result: input.result,
-      stop_reason: "end_turn",
+      stop_reason: input.stopReason ?? "end_turn",
       total_cost_usd: 0,
       usage: input.usage ?? {
         input_tokens: 1,
@@ -12312,6 +12313,104 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       }).pipe(Effect.provide(layer)),
     );
   });
+
+  it.effect.each([
+    {
+      name: "reports a silent refusal",
+      stopReason: "refusal",
+      expected: ["Claude declined this request."],
+      refusalAt: 0,
+    },
+    {
+      name: "keeps the provider's refusal notice",
+      stopReason: "refusal",
+      sdkNotice: "model_refusal_no_fallback",
+      content: "Claude's provider declined this request.",
+      expected: ["Claude's provider declined this request."],
+      refusalAt: 0,
+    },
+    {
+      name: "reports a refusal after a provider retry",
+      stopReason: "refusal",
+      sdkNotice: "model_refusal_fallback",
+      content: "Claude is retrying on its fallback model.",
+      expected: ["Claude is retrying on its fallback model.", "Claude declined this request."],
+      refusalAt: 1,
+    },
+    { name: "leaves a normal completion alone", stopReason: "end_turn", expected: [] },
+  ])(
+    "Claude result notices: $name",
+    ({ stopReason, sdkNotice, content = "", expected, refusalAt }) =>
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("claude-result-notice-attempt"),
+            text: "Review this request.",
+            attachments: [],
+          }),
+        );
+        if (sdkNotice !== undefined) {
+          yield* Queue.offer(
+            harness.sdkMessages,
+            claudeSdkFrame({
+              type: "system",
+              subtype: sdkNotice,
+              content,
+              original_model: "claude-sonnet",
+              request_id: null,
+              ...(sdkNotice === "model_refusal_fallback"
+                ? { trigger: "refusal", direction: "retry", fallback_model: "claude-haiku" }
+                : {}),
+              session_id: WAKE_NATIVE_SESSION,
+              uuid: "00000000-0000-4000-8000-000000000830",
+            }),
+          );
+        }
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000831",
+            result: content,
+            stopReason,
+          }),
+        );
+        assert.equal((yield* Queue.take(harness.terminalReceipts)).status, "completed");
+        const notices = harness.events.flatMap((event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "system_notice"
+            ? [event.turnItem]
+            : [],
+        );
+        assert.deepEqual(
+          notices.map((notice) => notice.message),
+          expected,
+        );
+        assert.deepEqual(
+          notices.flatMap((notice, index) =>
+            notice.refusal === undefined || index !== refusalAt ? [] : [notice.refusal.class],
+          ),
+          refusalAt === undefined ? [] : ["classifier"],
+        );
+        assert.isFalse(
+          harness.events.some(
+            (event) => event.type === "message.updated" && event.message.role === "assistant",
+          ),
+        );
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(
+            NodeServices.layer,
+            NodeCrypto.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+          ),
+        ),
+      ),
+  );
 
   // The passive row is the frame Claude 2.1.303 emits for a Stop hook returning a systemMessage.
   it.effect.each([

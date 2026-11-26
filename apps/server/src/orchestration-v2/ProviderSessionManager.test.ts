@@ -693,6 +693,7 @@ function layerTest(input: {
   readonly installationGateLayer?: Layer.Layer<ProviderInstallationGate.ProviderInstallationGate>;
   readonly pluginRegistryLayer?: Layer.Layer<PluginRegistry.PluginRegistry>;
 }) {
+  const serverSettingsLayer = input.serverSettingsLayer ?? ServerSettings.layerTest();
   const layerConfiguredEventSink =
     input.flakyReleaseWrites !== undefined
       ? layerFlakyReleaseEventSink(input.flakyReleaseWrites)
@@ -763,6 +764,7 @@ function layerTest(input: {
         Layer.mock(GitVcsDriver.GitVcsDriver)({
           resolveBranchName: () => Effect.succeed(null),
         }),
+        serverSettingsLayer,
       ),
     ),
   );
@@ -789,7 +791,7 @@ function layerTest(input: {
           layerConfiguredMcpRegistry,
           layerTestStores,
           input.installationGateLayer ?? ProviderInstallationGate.layer,
-          ...(input.serverSettingsLayer === undefined ? [] : [input.serverSettingsLayer]),
+          serverSettingsLayer,
           ...(input.projectServiceLayer === undefined ? [] : [input.projectServiceLayer]),
           ...(input.pluginRegistryLayer === undefined ? [] : [input.pluginRegistryLayer]),
         ),
