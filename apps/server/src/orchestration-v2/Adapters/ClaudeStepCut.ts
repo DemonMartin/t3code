@@ -158,7 +158,24 @@ function locateClaudeStep(
   if (target === undefined) return null;
   const response = responseOf(conversation[find(target.nativeItemId)!]);
   if (typeof response !== "string") return "not-a-step" as const;
+  return {
+    conversation,
+    uuidOf,
+    blocksOf,
+    responseOf,
+    find,
+    position: find(target.nativeItemId)!,
+    ...stepEntries(conversation, response, responseOf, blocksOf),
+  };
+}
 
+/** A response's entries and the results of its tool calls. */
+function stepEntries(
+  conversation: ReadonlyArray<unknown>,
+  response: string,
+  responseOf: (entry: unknown) => unknown,
+  blocksOf: (entry: unknown) => ReadonlyArray<unknown>,
+) {
   const step = new Set<unknown>();
   const toolIds = new Set<unknown>();
   for (const entry of conversation) {
@@ -178,7 +195,7 @@ function locateClaudeStep(
     )
       step.add(entry);
   }
-  return { conversation, uuidOf, blocksOf, response, step, toolIds, find };
+  return { response, step, toolIds };
 }
 
 /**
@@ -199,15 +216,36 @@ export function claudeTranscriptAnnotated(
       return undefined;
     }
   });
-  const step = locateClaudeStep(parsed, cut, providerThreadId);
-  if (step === null || step === "not-a-step") return step;
+  const located = locateClaudeStep(parsed, cut, providerThreadId);
+  if (located === null || located === "not-a-step") return located;
+  // A refused response often has nothing T3 shows (thinking only), so the item the caller names
+  // is the step before it. The refused response itself, when the transcript has it from there on,
+  // is the one to rewrite: the step before it was answered and stays as it was.
+  const refused = located.conversation
+    .slice(located.position)
+    .findLast(
+      (entry) =>
+        field(field(entry, "message"), "stop_reason") === "refusal" &&
+        field(entry, "isApiErrorMessage") !== true &&
+        typeof located.responseOf(entry) === "string",
+    );
+  const step =
+    refused === undefined
+      ? located
+      : stepEntries(
+          located.conversation,
+          located.responseOf(refused) as string,
+          located.responseOf,
+          located.blocksOf,
+        );
+  const blocksOf = located.blocksOf;
   const prose = (block: unknown) =>
     field(block, "type") === "thinking" ||
     field(block, "type") === "redacted_thinking" ||
     field(block, "type") === "text";
   const edited = parsed.map((entry, index) => {
     if (!step.step.has(entry)) return lines[index]!;
-    const blocks = step.blocksOf(entry);
+    const blocks = blocksOf(entry);
     if (field(entry, "type") === "user") {
       // Tool results: the call stays, the result becomes an error that asks to resume.
       const rewritten = blocks.map((block) =>

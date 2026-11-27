@@ -7526,10 +7526,10 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
                 { type: "text", text: REFUSAL_STEP_STAND_IN },
                 {
                   ...tool("call_2"),
+                  // The call's output leaves with it: the refused step read it.
                   state: {
                     status: "error",
                     input: {},
-                    content: [{ type: "text", text: "ok" }],
                     error: { type: "refusal", message: REFUSAL_TOOL_STAND_IN },
                   },
                 },

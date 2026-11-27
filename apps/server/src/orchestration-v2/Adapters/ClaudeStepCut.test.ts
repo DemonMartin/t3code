@@ -262,6 +262,29 @@ describe("one step cut out of a transcript", () => {
       );
     });
 
+    it("rewrites the refused response T3 never showed, not the answered step before it", () => {
+      // Claude's refused response is thinking only: no row of its own, so the caller names the
+      // step before it. That step was answered and stays; the refused response is rewritten.
+      const refused = [
+        ...transcript.slice(0, -2),
+        line("refused", "reply", "assistant", {
+          id: "response-4",
+          stop_reason: "refusal",
+          content: [{ type: "thinking", thinking: "refused" }],
+        }),
+        JSON.stringify({ type: "last-prompt", leafUuid: "refused" }),
+        "",
+      ];
+      const edit = annotateAt(5, refused);
+      const entries = parsed(edit.lines);
+      const contentOf = (uuid: string) =>
+        entries.find((entry) => entry.uuid === uuid)?.message?.content as ReadonlyArray<
+          Record<string, unknown>
+        >;
+      assert.deepEqual(contentOf("reply"), [{ type: "text", text: "done" }]);
+      assert.deepEqual(contentOf("refused"), [{ type: "text", text: REFUSAL_STEP_STAND_IN }]);
+    });
+
     it("leaves the user's own message and an absent step alone", () => {
       const own = { ...items[0]!, nativeItemId: "prompt" };
       assert.equal(

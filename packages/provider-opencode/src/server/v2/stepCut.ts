@@ -211,10 +211,13 @@ export const annotateMessage = Effect.fn("OpenCode2StepCut.annotateMessage")(fun
           typeof state === "object" && state !== null ? Reflect.get(state, "status") : undefined;
         // A call that finished becomes an error; one still running is left as it is.
         if (status === "completed" || status === "error") {
+          // The output goes with the call's status: an error may still carry `content`, and
+          // what the refused step read must not stay in the conversation.
+          const { content: _output, ...rest } = state as Record<string, unknown>;
           rewritten.push({
             ...part,
             state: {
-              ...(state as Record<string, unknown>),
+              ...rest,
               status: "error",
               error: { type: "refusal", message: REFUSAL_TOOL_STAND_IN },
             },
