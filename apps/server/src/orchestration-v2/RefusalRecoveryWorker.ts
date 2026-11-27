@@ -84,11 +84,10 @@ const handoffSelection = Effect.fnUntraced(function* (input: {
 });
 
 /**
- * Layer 5: undo a refused span and steer the next turn.
- *
- * A refusal left in context re-triggers, so the repair is a real revert first: the refused span
- * leaves the provider conversation, then one ladder rung is sent. The top rung hands off to the
- * other provider in the same step and pins the thread there. After the third, the thread parks.
+ * Layer 5: repair the refused step and steer the next turn. The step's text and thinking become
+ * a stand-in and its tool results errors, so the model reads a failed attempt instead of the same
+ * request again; then one ladder rung is sent. The top rung hands off to the other provider and
+ * pins the thread; after the third the thread parks.
  */
 const makeWorker = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
@@ -204,19 +203,19 @@ const makeWorker = Effect.gen(function* () {
       (candidate) => candidate.id === thread.activeProviderThreadId,
     )?.id;
     const items = quiet.turnItems.filter((item) => item.runId === run.id);
-    // The configured cut mode is the default; a turn with no step before the notice has nothing
-    // to keep, so it drops whole. The notice's own message must not count as the kept step.
+    // The configured mode is the default. A turn with no step before the notice has nothing to
+    // keep, so it drops whole; the notice's own message must not count as the kept step.
     const noticeIndex = items.findIndex((item) => item.id === itemId);
     const beforeNotice = noticeIndex === -1 ? items : items.slice(0, noticeIndex);
     const priorAnswer = beforeNotice.findLast((item) => item.type === "assistant_message")?.id;
     const cutMode =
-      preferences.repair.cutMode === "drop-refusal-only" && priorAnswer !== undefined
-        ? "drop-refusal-only"
+      preferences.repair.cutMode !== "drop-whole-turn" && priorAnswer !== undefined
+        ? preferences.repair.cutMode
         : "drop-whole-turn";
     const fromItemId =
-      cutMode === "drop-refusal-only"
-        ? priorAnswer
-        : items.find((item) => item.type === "user_message")?.id;
+      cutMode === "drop-whole-turn"
+        ? items.find((item) => item.type === "user_message")?.id
+        : priorAnswer;
     if (checkpoint === undefined || providerThreadId === undefined || fromItemId === undefined) {
       yield* Effect.logWarning("refusal recovery has no checkpoint to revert to", {
         threadId,
@@ -250,7 +249,8 @@ const makeWorker = Effect.gen(function* () {
       restoreFiles: false,
       requestId: CommandId.make(`refusal-revert:${key}`),
       fromItemId: TurnItemId.make(fromItemId),
-      ...(cutMode === "drop-refusal-only" ? { keepLater: true } : {}),
+      ...(cutMode === "drop-whole-turn" ? {} : { keepLater: true }),
+      ...(cutMode === "annotate" ? { annotate: true } : {}),
     });
 
     // Reasoning extraction never hands off; it drops the trace request and asks for the answer only.

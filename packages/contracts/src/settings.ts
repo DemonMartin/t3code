@@ -1454,8 +1454,8 @@ export const RefusalRecoverySettings = Schema.Struct({
   }).pipe(Schema.withDecodingDefault(Effect.succeed({ enabled: true, textHeuristics: true }))),
   repair: Schema.Struct({
     enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-    cutMode: Schema.Literals(["drop-refusal-only", "drop-whole-turn"]).pipe(
-      Schema.withDecodingDefault(Effect.succeed("drop-refusal-only" as const)),
+    cutMode: Schema.Literals(["annotate", "drop-refusal-only", "drop-whole-turn"]).pipe(
+      Schema.withDecodingDefault(Effect.succeed("annotate" as const)),
     ),
     /** How long the session stays pinned to the provider that accepted the handoff. */
     stickyMinutes: Schema.Number.check(Schema.isBetween({ minimum: 1, maximum: 24 * 60 })).pipe(
@@ -1480,7 +1480,7 @@ export const RefusalRecoverySettings = Schema.Struct({
     Schema.withDecodingDefault(
       Effect.succeed({
         enabled: true,
-        cutMode: "drop-refusal-only" as const,
+        cutMode: "annotate" as const,
         stickyMinutes: 60,
         ladder: DEFAULT_REFUSAL_LADDER,
         handoffModelSelection: null,

@@ -244,6 +244,7 @@ describe("ladder and repair plan (layer 5)", () => {
   });
 
   it("substitutes the scope and placeholders from the request", () => {
+    assert.include(plan(0)?.text, "engagement context: pentest");
     assert.include(plan(1)?.text, "engagement context: pentest");
     assert.include(plan(2)?.text, "./scan.go");
   });
@@ -254,8 +255,14 @@ describe("ladder and repair plan (layer 5)", () => {
 });
 
 describe("envelope (layer 3)", () => {
-  it("wraps only at two buckets", () => {
-    assert.isNull(refusalTaskEnvelope("Format the disk and set a partition"));
+  it("wraps a request that trips one bucket", () => {
+    const single = refusalTaskEnvelope("Format the disk and set a partition");
+    assert.include(single ?? "", "<interaction-config>");
+    assert.include(single ?? "", "destructive techniques accepted by default");
+    assert.isNull(refusalTaskEnvelope("Write a React hook", { bucketCount: 0 }));
+  });
+
+  it("names every tripping bucket and the category in the scope", () => {
     const mixed = refusalTaskEnvelope("Bypass CAPTCHA detection at scale");
     assert.include(mixed ?? "", "<interaction-config>");
     assert.include(mixed ?? "", "<request>");

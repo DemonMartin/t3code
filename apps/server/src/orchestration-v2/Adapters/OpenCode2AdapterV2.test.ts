@@ -42,6 +42,10 @@ import * as Exit from "effect/Exit";
 import { TestClock } from "effect/testing";
 
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import {
+  REFUSAL_STEP_STAND_IN,
+  REFUSAL_TOOL_STAND_IN,
+} from "@t3tools/provider-core/server/refusal";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 import { htmlRenderFromToolItem, sentMessageFromToolItem } from "@t3tools/shared/toolOutput";
@@ -7481,6 +7485,123 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       });
       assert.equal(snapshot.cutFromOrdinal, 102);
       assert.equal(snapshot.cutToOrdinal, 104);
+    }),
+  );
+
+  it.effect("rewrites one refused step in place and keeps every later one", () =>
+    Effect.gen(function* () {
+      const prompt = `msg_t3_turn_${SESSION}:attempt:opencode2-adapter`;
+      const tool = (id: string) => ({
+        type: "tool",
+        id,
+        name: "shell",
+        state: { status: "completed", input: {}, content: [{ type: "text", text: "ok" }] },
+        time: { created: 1 },
+      });
+      const step = (id: string, content: ReadonlyArray<unknown>) => ({
+        id,
+        type: "assistant",
+        agent: "build",
+        model: { providerID: "gateway", id: "model" },
+        content,
+        time: { created: 1 },
+      });
+      const history = [
+        { id: prompt, time: { created: 1 }, text: "first", type: "user" },
+        step("msg_step_1", [tool("call_1")]),
+        step("msg_step_2", [
+          { type: "reasoning", text: "next" },
+          { type: "text", text: "I can't do that." },
+          tool("call_2"),
+        ]),
+        { ...step("msg_step_3", [{ type: "text", text: "done" }]), added: { later: true } },
+      ];
+      const info = { id: SESSION, location: { directory: "/workspace/project" }, added: 1 };
+      const annotated = history.map((message) =>
+        message.id !== "msg_step_2"
+          ? message
+          : {
+              ...message,
+              content: [
+                { type: "text", text: REFUSAL_STEP_STAND_IN },
+                {
+                  ...tool("call_2"),
+                  state: {
+                    status: "error",
+                    input: {},
+                    content: [{ type: "text", text: "ok" }],
+                    error: { type: "refusal", message: REFUSAL_TOOL_STAND_IN },
+                  },
+                },
+              ],
+            },
+      );
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+        promptAccepted,
+        event("session.execution.started", { sessionID: SESSION }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+        out("message.list", "<any>"),
+        reply("message.list", { data: history, cursor: {} }),
+        out("session.list", { parentID: SESSION, limit: "100" }),
+        reply("session.list", { data: [], cursor: {} }),
+        out("session.export", { sessionID: SESSION }),
+        replyData("session.export", { info, messages: history }),
+        out("session.remove", { sessionID: SESSION }),
+        reply("session.remove", null),
+        out("session.import", {
+          info,
+          messages: annotated,
+          location: { directory: "/workspace/project" },
+        }),
+        replyData("session.import", info),
+        out("message.list", "<any>"),
+        reply("message.list", { data: annotated, cursor: {} }),
+      ]);
+      const ended = yield* Deferred.make<OrchestrationV2ProviderTurn>();
+      yield* runtime.events.pipe(
+        Stream.tap((event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status !== "running"
+            ? Deferred.succeed(ended, event.providerTurn)
+            : Effect.void,
+        ),
+        Stream.runDrain,
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(turnInput(thread));
+      const turn = yield* Deferred.await(ended);
+      const item = (
+        ordinal: number,
+        type: "reasoning" | "dynamic_tool" | "assistant_message",
+        nativeItemId: string,
+      ) => ({
+        id: TurnItemId.make(`item:${ordinal}`),
+        ordinal,
+        type,
+        providerThreadId: thread.id,
+        providerTurnId: turn.id,
+        nativeItemId,
+      });
+      const items = [
+        item(101, "dynamic_tool", "call_1"),
+        item(102, "reasoning", "msg_step_2:reasoning:0"),
+        item(103, "dynamic_tool", "call_2"),
+        item(104, "assistant_message", "msg_step_3:text:0"),
+      ];
+      const snapshot = yield* runtime.rollbackThread({
+        providerThread: thread,
+        target: {
+          type: "provider_turn",
+          checkpointId: CheckpointId.make("checkpoint:first"),
+          appRunOrdinal: 1,
+          providerTurn: turn,
+          cut: { item: items[2]!, items, only: true, annotate: true },
+        },
+        providerThreadTurns: [turn],
+      });
+      assert.isTrue(snapshot.annotated);
+      assert.isUndefined(snapshot.cutFromOrdinal);
+      assert.isUndefined(snapshot.cutToOrdinal);
     }),
   );
 

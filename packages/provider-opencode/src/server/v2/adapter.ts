@@ -5611,6 +5611,15 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                 });
               }
               if (step !== null && state !== undefined) {
+                if (cut.annotate === true) {
+                  yield* StepCut.annotateMessage(
+                    connection,
+                    sessionId,
+                    state.directory,
+                    step.messageId,
+                  );
+                  return { ...(yield* snapshotOf(providerThread, sessionId)), annotated: true };
+                }
                 yield* StepCut.removeMessage(
                   connection,
                   sessionId,

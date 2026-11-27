@@ -827,7 +827,7 @@ const seedRollbackHistory = Effect.gen(function* () {
   const rollbackCounts: number[] = [];
   const cuts: Array<ProviderAdapter.ProviderAdapterV2TurnCut | undefined> = [];
   /** What the provider reports as the first item it cut; absent leaves the item asked for. */
-  const cutFrom: { ordinal?: number; next?: number } = {};
+  const cutFrom: { ordinal?: number; next?: number; annotated?: boolean } = {};
   const restored: CheckpointId[] = [];
   const deletedRefs: CheckpointId[] = [];
   const discardedRepositoryOrdinals: number[] = [];
@@ -881,6 +881,7 @@ const seedRollbackHistory = Effect.gen(function* () {
                     providerThread: input.providerThread,
                     ...(cutFrom.ordinal === undefined ? {} : { cutFromOrdinal: cutFrom.ordinal }),
                     ...(cutFrom.next === undefined ? {} : { cutToOrdinal: cutFrom.next }),
+                    ...(cutFrom.annotated === true ? { annotated: true } : {}),
                   };
                 }),
             } as never),
@@ -899,6 +900,7 @@ const seedRollbackHistory = Effect.gen(function* () {
     fromItemId?: TurnItemId,
     keepLater?: boolean,
     switchTo?: ModelSelection,
+    annotate?: boolean,
   ) =>
     Effect.gen(function* () {
       const service = yield* CheckpointRollbackService.CheckpointRollbackServiceV2;
@@ -911,6 +913,7 @@ const seedRollbackHistory = Effect.gen(function* () {
         ...(restoreFiles === undefined ? {} : { restoreFiles }),
         ...(fromItemId === undefined ? {} : { fromItemId }),
         ...(keepLater === true ? { keepLater: true } : {}),
+        ...(annotate === true ? { annotate: true } : {}),
       });
     }).pipe(Effect.provide(serviceLayer));
 
@@ -1139,6 +1142,31 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
           [[history.runId(2), "completed"]],
         );
         assert.deepEqual(history.deletedRefs, []);
+        const records = yield* history.store.getThreadRecords(history.threadId, [
+          "providerThreads",
+        ]);
+        assert.equal(records.providerThreads[0]?.lastRunOrdinal, 6);
+      }),
+    );
+
+    it.effect("annotates a step without recording a truncation", () =>
+      Effect.gen(function* () {
+        const history = yield* seedRollbackHistory;
+        history.cutFrom.ordinal = 202;
+        history.cutFrom.annotated = true;
+        const before = yield* history.store.getRun(history.threadId, history.runId(2));
+
+        yield* history.rollback(2, false, history.itemId(203), true, undefined, true);
+
+        assert.deepEqual(
+          history.cuts.map((cut) => [cut?.item.ordinal, cut?.only, cut?.annotate]),
+          [[203, true, true]],
+        );
+        // Nothing left the conversation, so no truncation is added and the run stays whole.
+        const run = yield* history.store.getRun(history.threadId, history.runId(2));
+        assert.equal(run?.truncations?.length, before?.truncations?.length ?? 0);
+        assert.isFalse(history.committed.some((event) => event.type === "run.updated"));
+        assert.deepEqual(history.restored, []);
         const records = yield* history.store.getThreadRecords(history.threadId, [
           "providerThreads",
         ]);

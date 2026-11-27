@@ -119,6 +119,11 @@ export interface CheckpointRollbackServiceV2Shape {
     /** With `fromItemId`: only that step leaves; later steps and turns stay as they are. */
     readonly keepLater?: boolean;
     /**
+     * With `fromItemId` and `keepLater`: the step stays and its content is rewritten into a
+     * refused attempt instead of leaving the conversation.
+     */
+    readonly annotate?: boolean;
+    /**
      * The checkpoint's turn was another agent's: that provider thread, run with this model,
      * becomes the thread's agent again.
      */
@@ -174,6 +179,7 @@ export const layer: Layer.Layer<
       readonly requestId?: CommandId;
       readonly fromItemId?: TurnItemId;
       readonly keepLater?: boolean;
+      readonly annotate?: boolean;
       readonly modelSelection?: ModelSelection;
     }) {
       const context = yield* projections.getCheckpointRollbackContext(input.threadId, input);
@@ -181,6 +187,7 @@ export const layer: Layer.Layer<
       const { providerThread, checkpoint, scope, targetAttempt } = context;
       // One step cut out leaves the later runs, and so their checkpoints, where they are.
       const keepLater = input.keepLater === true && input.fromItemId !== undefined;
+      const annotate = keepLater && input.annotate === true;
       const runsToRollback = keepLater ? [] : context.runsToRollback;
       const staleCheckpoints = keepLater ? [] : context.staleCheckpoints;
       // A cut leaves files alone: snapshots exist per run, not per step.
@@ -477,7 +484,7 @@ export const layer: Layer.Layer<
 
       const snapshot: Pick<
         ProviderAdapter.ProviderAdapterV2ThreadSnapshot,
-        "providerThread" | "cutFromOrdinal" | "cutToOrdinal" | "providerTurns"
+        "providerThread" | "cutFromOrdinal" | "cutToOrdinal" | "providerTurns" | "annotated"
       > =
         runsToRollback.length === 0 && cut === undefined
           ? { providerThread }
@@ -492,6 +499,7 @@ export const layer: Layer.Layer<
                         item: cut.item,
                         items: cut.items,
                         ...(keepLater ? { only: true } : {}),
+                        ...(annotate ? { annotate: true } : {}),
                       },
                     },
               providerThreadTurns,
@@ -652,7 +660,7 @@ export const layer: Layer.Layer<
               }),
             );
           }
-          if (cut !== undefined) {
+          if (cut !== undefined && snapshot.annotated !== true) {
             // The turn's opening message stays: a step is never the user's own input.
             const opening = cut.items[0]?.ordinal ?? cut.item.ordinal;
             const fromOrdinal = Math.max(

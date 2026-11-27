@@ -1,5 +1,5 @@
 /**
- * Rewinding a Claude conversation to a step inside a turn, and cutting one step out of it.
+ * Rewinding a Claude conversation to a step inside a turn, and cutting or annotating one step.
  *
  * A step is one model response: the transcript entries that share its response id, and the
  * results of its tool calls. A rewind resumes the session from the entry before the step. A cut
@@ -12,6 +12,10 @@ import {
   type OrchestrationV2ProviderTurn,
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import {
+  REFUSAL_STEP_STAND_IN,
+  REFUSAL_TOOL_STAND_IN,
+} from "@t3tools/provider-core/server/refusal";
 import type * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
@@ -103,32 +107,12 @@ function isPromptEntry(entry: ClaudeTranscriptEntry): boolean {
   );
 }
 
-/**
- * A transcript's lines without the model step that produced an item (its response and tool
- * results); what followed is linked to what came before. `replacementOf` gives a removed entry's
- * last kept ancestor. Null: no such item in the transcript. "not-a-step": the item is the user's.
- */
-export function claudeTranscriptWithoutStep(
-  lines: ReadonlyArray<string>,
+/** The transcript's main conversation, in file order, and where a step's entries sit in it. */
+function locateClaudeStep(
+  parsed: ReadonlyArray<unknown>,
   cut: ProviderAdapter.ProviderAdapterV2TurnCut,
   providerThreadId: OrchestrationV2ProviderThread["id"],
-):
-  | {
-      readonly lines: ReadonlyArray<string>;
-      readonly replacementOf: (uuid: string) => string | null | undefined;
-      readonly fromOrdinal: number;
-      readonly toOrdinal?: number;
-    }
-  | "not-a-step"
-  | null {
-  const parsed = lines.map((line): unknown => {
-    if (line.trim().length === 0) return undefined;
-    try {
-      return JSON.parse(line);
-    } catch {
-      return undefined;
-    }
-  });
+) {
   const uuidOf = (entry: unknown) => {
     const uuid = field(entry, "uuid");
     return typeof uuid === "string" ? uuid : undefined;
@@ -173,13 +157,13 @@ export function claudeTranscriptWithoutStep(
   );
   if (target === undefined) return null;
   const response = responseOf(conversation[find(target.nativeItemId)!]);
-  if (typeof response !== "string") return "not-a-step";
+  if (typeof response !== "string") return "not-a-step" as const;
 
-  const removed = new Set<string>();
+  const step = new Set<unknown>();
   const toolIds = new Set<unknown>();
   for (const entry of conversation) {
     if (responseOf(entry) !== response) continue;
-    removed.add(uuidOf(entry)!);
+    step.add(entry);
     for (const block of blocksOf(entry)) {
       if (field(block, "type") === "tool_use") toolIds.add(field(block, "id"));
     }
@@ -192,8 +176,103 @@ export function claudeTranscriptWithoutStep(
           field(block, "type") === "tool_result" && toolIds.has(field(block, "tool_use_id")),
       )
     )
-      removed.add(uuidOf(entry)!);
+      step.add(entry);
   }
+  return { conversation, uuidOf, blocksOf, response, step, toolIds, find };
+}
+
+/**
+ * A transcript's lines with the step that produced an item rewritten in place instead of cut: its
+ * reasoning and text become one stand-in note, its tool results become errors that say to resume.
+ * The step stays, so later links and the recorded end of the conversation need no moving.
+ */
+export function claudeTranscriptAnnotated(
+  lines: ReadonlyArray<string>,
+  cut: ProviderAdapter.ProviderAdapterV2TurnCut,
+  providerThreadId: OrchestrationV2ProviderThread["id"],
+): { readonly lines: ReadonlyArray<string> } | "not-a-step" | null {
+  const parsed = lines.map((line): unknown => {
+    if (line.trim().length === 0) return undefined;
+    try {
+      return JSON.parse(line);
+    } catch {
+      return undefined;
+    }
+  });
+  const step = locateClaudeStep(parsed, cut, providerThreadId);
+  if (step === null || step === "not-a-step") return step;
+  const prose = (block: unknown) =>
+    field(block, "type") === "thinking" ||
+    field(block, "type") === "redacted_thinking" ||
+    field(block, "type") === "text";
+  const edited = parsed.map((entry, index) => {
+    if (!step.step.has(entry)) return lines[index]!;
+    const blocks = step.blocksOf(entry);
+    if (field(entry, "type") === "user") {
+      // Tool results: the call stays, the result becomes an error that asks to resume.
+      const rewritten = blocks.map((block) =>
+        field(block, "type") === "tool_result"
+          ? {
+              ...(block as Record<string, unknown>),
+              content: REFUSAL_TOOL_STAND_IN,
+              is_error: true,
+            }
+          : block,
+      );
+      return JSON.stringify(replaceMessageContent(entry, rewritten));
+    }
+    // The response: reasoning cannot be edited in place, so it goes; prose becomes the stand-in
+    // note, and the tool calls stay so their results keep their pairing.
+    const kept = blocks.filter((block) => !prose(block));
+    if (kept.length !== blocks.length || kept.length === 0) {
+      kept.push({ type: "text", text: REFUSAL_STEP_STAND_IN });
+    }
+    return JSON.stringify(replaceMessageContent(entry, kept));
+  });
+  return { lines: edited };
+}
+
+function replaceMessageContent(entry: unknown, content: ReadonlyArray<unknown>): unknown {
+  const message = field(entry, "message");
+  const source =
+    message !== null && typeof message === "object"
+      ? (message as Record<string, unknown>)
+      : { content: [] };
+  return { ...(entry as Record<string, unknown>), message: { ...source, content } };
+}
+
+/**
+ * A transcript's lines without the model step that produced an item (its response and tool
+ * results); what followed is linked to what came before. `replacementOf` gives a removed entry's
+ * last kept ancestor. Null: no such item in the transcript. "not-a-step": the item is the user's.
+ */
+export function claudeTranscriptWithoutStep(
+  lines: ReadonlyArray<string>,
+  cut: ProviderAdapter.ProviderAdapterV2TurnCut,
+  providerThreadId: OrchestrationV2ProviderThread["id"],
+):
+  | {
+      readonly lines: ReadonlyArray<string>;
+      readonly replacementOf: (uuid: string) => string | null | undefined;
+      readonly fromOrdinal: number;
+      readonly toOrdinal?: number;
+    }
+  | "not-a-step"
+  | null {
+  const parsed = lines.map((line): unknown => {
+    if (line.trim().length === 0) return undefined;
+    try {
+      return JSON.parse(line);
+    } catch {
+      return undefined;
+    }
+  });
+  const located = locateClaudeStep(parsed, cut, providerThreadId);
+  if (located === null || located === "not-a-step") return located;
+  const { conversation, uuidOf, step, find } = located;
+
+  const removed = new Set<string>();
+  for (const entry of step) removed.add(uuidOf(entry)!);
 
   const parentOf = new Map<string, unknown>();
   for (const entry of parsed) {
@@ -291,8 +370,8 @@ export const rollbackClaudeStep = Effect.fn("ClaudeStepCut.rollbackClaudeStep")(
   };
 
   if (cut.only === true) {
-    // Later steps and turns stay, so the transcript itself loses the step: resuming at an entry
-    // can only drop a tail.
+    // Later steps and turns stay, so the transcript itself changes: resuming at an entry can only
+    // drop a tail. An annotated step stays and is rewritten; a cut one leaves.
     const transcriptPath = yield* input.transcriptPath;
     if (transcriptPath === undefined) {
       return yield* refused(
@@ -301,6 +380,26 @@ export const rollbackClaudeStep = Effect.fn("ClaudeStepCut.rollbackClaudeStep")(
       );
     }
     const transcript = yield* input.fileSystem.readFileString(transcriptPath);
+    if (cut.annotate === true) {
+      const annotated = claudeTranscriptAnnotated(transcript.split("\n"), cut, providerThread.id);
+      if (annotated === "not-a-step") {
+        return yield* refused(
+          providerThread,
+          "Only a step the agent took can be annotated in a Claude conversation.",
+        );
+      }
+      // Nothing left to rewrite: an annotation that already ran looks like this.
+      if (annotated === null) return { providerThread: idle, messages: [], runtimeRequests: [] };
+      const draft = `${transcriptPath}.t3-annotate`;
+      yield* input.fileSystem.writeFileString(draft, annotated.lines.join("\n"));
+      yield* input.fileSystem.rename(draft, transcriptPath);
+      return {
+        providerThread: idle,
+        messages: [],
+        runtimeRequests: [],
+        annotated: true,
+      } satisfies ProviderAdapter.ProviderAdapterV2ThreadSnapshot;
+    }
     const edit = claudeTranscriptWithoutStep(transcript.split("\n"), cut, providerThread.id);
     if (edit === "not-a-step") {
       return yield* refused(

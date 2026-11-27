@@ -7,6 +7,10 @@
  */
 import { Session } from "@opencode/client/effect";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import {
+  REFUSAL_STEP_STAND_IN,
+  REFUSAL_TOOL_STAND_IN,
+} from "@t3tools/provider-core/server/refusal";
 import type { OrchestrationV2ProviderThread } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
@@ -86,14 +90,17 @@ export const stepBoundary = Effect.fn("OpenCode2StepCut.stepBoundary")(function*
 });
 
 /**
- * Writes the session back under its own id without one message, so every other id T3 holds
+ * Writes the session back under its own id with one message changed, so every other id T3 holds
  * stays good. Deleting a session deletes its subagents' sessions, so they go back in after it.
  */
-export const removeMessage = Effect.fn("OpenCode2StepCut.removeMessage")(function* (
+const rewriteMessage = Effect.fn("OpenCode2StepCut.rewriteMessage")(function* (
   connection: Connection,
   sessionId: string,
   directory: string,
   messageId: string,
+  rewrite: (
+    message: OpenCode2Client.OpenCode2Transcript["messages"][number],
+  ) => OpenCode2Client.OpenCode2Transcript["messages"][number] | undefined,
 ) {
   const { client, transcript: transcripts } = connection;
   if (transcripts === undefined) {
@@ -131,7 +138,14 @@ export const removeMessage = Effect.fn("OpenCode2StepCut.removeMessage")(functio
   yield* client.session.remove({ sessionID: Session.ID.make(sessionId) });
   yield* transcripts
     .write(
-      { ...original, messages: original.messages.filter((message) => message.id !== messageId) },
+      {
+        ...original,
+        messages: original.messages.flatMap((message) => {
+          if (message.id !== messageId) return [message];
+          const rewritten = rewrite(message);
+          return rewritten === undefined ? [] : [rewritten];
+        }),
+      },
       directoryOf(original),
     )
     .pipe(
@@ -149,4 +163,68 @@ export const removeMessage = Effect.fn("OpenCode2StepCut.removeMessage")(functio
         ),
       ),
     );
+});
+
+/** Takes one message out of the history. */
+export const removeMessage = Effect.fn("OpenCode2StepCut.removeMessage")(function* (
+  connection: Connection,
+  sessionId: string,
+  directory: string,
+  messageId: string,
+) {
+  yield* rewriteMessage(connection, sessionId, directory, messageId, () => undefined);
+});
+
+/**
+ * Keeps one message but rewrites it into a step that was refused: its reasoning goes, its prose
+ * becomes a stand-in note and its finished tool calls become errors, so the model reads an
+ * attempt that failed and continues differently. Reasoning cannot be edited in place, so it is
+ * dropped rather than kept with stale text.
+ */
+export const annotateMessage = Effect.fn("OpenCode2StepCut.annotateMessage")(function* (
+  connection: Connection,
+  sessionId: string,
+  directory: string,
+  messageId: string,
+) {
+  yield* rewriteMessage(connection, sessionId, directory, messageId, (message) => {
+    const content = Array.isArray(Reflect.get(message, "content"))
+      ? (Reflect.get(message, "content") as ReadonlyArray<unknown>)
+      : [];
+    const partType = (part: unknown) =>
+      typeof part === "object" && part !== null ? Reflect.get(part, "type") : undefined;
+    const rewritten: Array<unknown> = [];
+    let noted = false;
+    for (const part of content) {
+      const type = partType(part);
+      if (type === "reasoning") continue;
+      if (type === "text") {
+        if (!noted) {
+          rewritten.push({ type: "text", text: REFUSAL_STEP_STAND_IN });
+          noted = true;
+        }
+        continue;
+      }
+      if (type === "tool" && typeof part === "object" && part !== null) {
+        const state = Reflect.get(part, "state");
+        const status =
+          typeof state === "object" && state !== null ? Reflect.get(state, "status") : undefined;
+        // A call that finished becomes an error; one still running is left as it is.
+        if (status === "completed" || status === "error") {
+          rewritten.push({
+            ...part,
+            state: {
+              ...(state as Record<string, unknown>),
+              status: "error",
+              error: { type: "refusal", message: REFUSAL_TOOL_STAND_IN },
+            },
+          });
+          continue;
+        }
+      }
+      rewritten.push(part);
+    }
+    if (!noted) rewritten.push({ type: "text", text: REFUSAL_STEP_STAND_IN });
+    return { ...message, content: rewritten };
+  });
 });

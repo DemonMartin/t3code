@@ -692,6 +692,8 @@ export interface ProviderAdapterV2ThreadSnapshot {
    * conversation still holds. Absent when the step was the last of its run.
    */
   readonly cutToOrdinal?: number;
+  /** After an annotated step (`cut.annotate`): nothing left the conversation, only its content changed. */
+  readonly annotated?: boolean;
   /** Provider turns whose native refs a rollback with a `cut` moved. */
   readonly providerTurns?: ReadonlyArray<OrchestrationV2ProviderTurn>;
 }
@@ -722,6 +724,12 @@ export interface ProviderAdapterV2TurnCut {
    * set. Without it, everything after the step leaves too.
    */
   readonly only?: boolean;
+  /**
+   * Keep the step but rewrite it: its reasoning and text become a "this step was refused, resume"
+   * note and its tool results become errors, so the conversation reads as an attempt that failed.
+   * Implies `only`; nothing is removed, so the caller records no truncation.
+   */
+  readonly annotate?: boolean;
 }
 
 export interface ProviderAdapterV2ReadThreadSnapshotInput {

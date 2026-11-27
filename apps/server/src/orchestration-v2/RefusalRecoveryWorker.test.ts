@@ -10,6 +10,7 @@ import {
   type OrchestrationV2RefusalRecovery,
 } from "@t3tools/contracts";
 import {
+  bucketScope,
   DEFAULT_REFUSAL_LADDER,
   rewordReasoningExtraction,
 } from "@t3tools/provider-core/server/refusal";
@@ -65,10 +66,11 @@ const makeHarness = (
     readonly resume?: OrchestrationV2RefusalRecovery;
     readonly items?: ReadonlyArray<Item>;
     readonly checkpointId?: string | null;
-    readonly cutMode?: "drop-refusal-only" | "drop-whole-turn";
+    readonly cutMode?: "annotate" | "drop-refusal-only" | "drop-whole-turn";
     readonly instances?: ReadonlyArray<unknown>;
     readonly request?: string;
     readonly pinCandidates?: ReadonlyArray<unknown>;
+    readonly handoffModelSelection?: ModelSelection | null;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -108,10 +110,10 @@ const makeHarness = (
         detection: { enabled: true, textHeuristics: true },
         repair: {
           enabled: true,
-          cutMode: options.cutMode ?? "drop-refusal-only",
+          cutMode: options.cutMode ?? "annotate",
           stickyMinutes: 60,
           ladder: DEFAULT_REFUSAL_LADDER,
-          handoffModelSelection: null,
+          handoffModelSelection: options.handoffModelSelection ?? null,
         },
         providers: {},
       },
@@ -182,7 +184,7 @@ const send = (
   } as never);
 
 describe("RefusalRecoveryWorker", () => {
-  it.effect("reverts the refused span, then sends the first rung", () =>
+  it.effect("rewrites the refused step in place, then sends the first rung", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(nowMs);
       const harness = yield* makeHarness();
@@ -193,12 +195,16 @@ describe("RefusalRecoveryWorker", () => {
         assert.strictEqual(rollback.threadId, threadId);
         assert.strictEqual(rollback.fromItemId, priorAnswerId);
         assert.strictEqual(rollback.keepLater, true);
+        assert.strictEqual(rollback.annotate, true);
         assert.strictEqual(rollback.restoreFiles, false);
 
         const dispatch = yield* Queue.take(harness.commands);
         assert.strictEqual(dispatch.type, "message.dispatch");
         if (dispatch.type !== "message.dispatch") return;
-        assert.strictEqual(dispatch.text, DEFAULT_REFUSAL_LADDER.rung1);
+        assert.strictEqual(
+          dispatch.text,
+          DEFAULT_REFUSAL_LADDER.rung1.replaceAll("{scope}", bucketScope("pentest")),
+        );
         assert.strictEqual(dispatch.createdBy, "agent");
 
         const meta = yield* Queue.take(harness.commands);
@@ -206,6 +212,34 @@ describe("RefusalRecoveryWorker", () => {
         if (meta.type !== "thread.metadata.update") return;
         assert.strictEqual(meta.refusalRecovery?.rung, 1);
         assert.strictEqual(meta.refusalRecovery?.outcome, "revert");
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("drops the refused step when the mode says so", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(nowMs);
+      const harness = yield* makeHarness({ cutMode: "drop-refusal-only" });
+      yield* Effect.gen(function* () {
+        yield* send(harness.events, notice());
+        const rollback = yield* Queue.take(harness.rollbacks);
+        assert.strictEqual(rollback.fromItemId, priorAnswerId);
+        assert.strictEqual(rollback.keepLater, true);
+        assert.isUndefined(rollback.annotate);
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("drops the whole turn when the mode says so", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(nowMs);
+      const harness = yield* makeHarness({ cutMode: "drop-whole-turn" });
+      yield* Effect.gen(function* () {
+        yield* send(harness.events, notice());
+        const rollback = yield* Queue.take(harness.rollbacks);
+        assert.strictEqual(rollback.fromItemId, userMessageId);
+        assert.isUndefined(rollback.keepLater);
+        assert.isUndefined(rollback.annotate);
       }).pipe(Effect.provide(harness.layer));
     }),
   );
@@ -258,6 +292,36 @@ describe("RefusalRecoveryWorker", () => {
         assert.strictEqual(meta.refusalRecovery?.outcome, "handoff");
         assert.strictEqual(meta.refusalRecovery?.handoff?.instanceId, opencode.instanceId);
         assert.isNotNull(meta.refusalRecovery?.pinnedUntil);
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("hands off to the model named in the settings, not the first one", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(nowMs);
+      const instances = [
+        {
+          instanceId: "opencode_local",
+          driverKind: "opencode",
+          enabled: true,
+          snapshot: { getSnapshot: Effect.succeed({ models: [{ slug: "qwen3-coder" }] }) },
+        },
+      ];
+      const harness = yield* makeHarness({
+        items: [{ id: userMessageId, runId, type: "user_message", createdBy: "agent" }],
+        instances,
+        handoffModelSelection: ModelSelection.make({
+          instanceId: ProviderInstanceId.make("opencode_local"),
+          model: "glm-5",
+        }),
+      });
+      yield* Effect.gen(function* () {
+        yield* send(harness.events, notice(), "item:notice-1");
+        yield* Queue.take(harness.rollbacks);
+        const dispatch = yield* Queue.take(harness.commands);
+        assert.strictEqual(dispatch.type, "message.dispatch");
+        if (dispatch.type !== "message.dispatch") return;
+        assert.strictEqual(dispatch.modelSelection?.model, "glm-5");
       }).pipe(Effect.provide(harness.layer));
     }),
   );

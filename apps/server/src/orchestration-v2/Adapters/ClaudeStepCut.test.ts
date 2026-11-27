@@ -1,7 +1,15 @@
 import { ProviderThreadId, TurnItemId } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 
-import { claudeStepCut, claudeTranscriptWithoutStep } from "./ClaudeStepCut.ts";
+import {
+  REFUSAL_STEP_STAND_IN,
+  REFUSAL_TOOL_STAND_IN,
+} from "@t3tools/provider-core/server/refusal";
+import {
+  claudeStepCut,
+  claudeTranscriptAnnotated,
+  claudeTranscriptWithoutStep,
+} from "./ClaudeStepCut.ts";
 
 describe("a cut at a step", () => {
   const providerThreadId = ProviderThreadId.make("provider-thread:cut");
@@ -196,5 +204,82 @@ describe("one step cut out of a transcript", () => {
         providerThreadId,
       ),
     );
+  });
+
+  describe("a step rewritten in place", () => {
+    const parsed = (lines: ReadonlyArray<string>) =>
+      lines.flatMap((entry) => (entry.trim().length === 0 ? [] : [JSON.parse(entry)]));
+    const annotateAt = (ordinal: number, lines = transcript) => {
+      const edit = claudeTranscriptAnnotated(
+        lines,
+        { item: items.find((candidate) => candidate.ordinal === ordinal)!, items, annotate: true },
+        providerThreadId,
+      );
+      if (edit === null || edit === "not-a-step") throw new Error(`no step at ${ordinal}`);
+      return edit;
+    };
+
+    it("keeps the step, drops its thinking and marks its tool results as errors", () => {
+      const edit = annotateAt(3);
+      // Nothing leaves, so every link and the recorded end still point at what they did.
+      assert.deepEqual(uuids(edit.lines), uuids(transcript));
+      assert.equal(JSON.parse(edit.lines.at(-2)!).leafUuid, "reply");
+      const entries = parsed(edit.lines);
+      const blocksOf = (entry: { message?: { content?: unknown } }) =>
+        (entry.message?.content ?? []) as ReadonlyArray<Record<string, unknown>>;
+
+      // The response keeps its tool calls and loses the thinking that led to them.
+      const step = entries.filter((entry) => entry.message?.id === "response-2");
+      assert.deepEqual(
+        step.flatMap(blocksOf).map((block) => block.type),
+        ["text", "tool_use", "tool_use"],
+      );
+      assert.equal(blocksOf(step[0]!)[0]!.text, REFUSAL_STEP_STAND_IN);
+      assert.deepEqual(
+        step.flatMap(blocksOf).flatMap((block) => (block.type === "tool_use" ? [block.id] : [])),
+        ["tool-2a", "tool-2b"],
+      );
+
+      // Its results read as calls that errored, under the same tool_use ids.
+      const results = entries.filter(
+        (entry) => entry.uuid === "result-2a" || entry.uuid === "result-2b",
+      );
+      assert.deepEqual(
+        results.map((entry) => blocksOf(entry)[0]!.tool_use_id),
+        ["tool-2a", "tool-2b"],
+      );
+      for (const entry of results) {
+        assert.deepEqual(blocksOf(entry)[0]!.content, REFUSAL_TOOL_STAND_IN);
+        assert.isTrue(blocksOf(entry)[0]!.is_error);
+      }
+
+      // The text of a step that only answered becomes the stand-in and nothing else.
+      const replied = annotateAt(5);
+      const reply = parsed(replied.lines).find((entry) => entry.uuid === "reply");
+      assert.deepEqual(
+        blocksOf(reply!).map((block) => [block.type, block.text]),
+        [["text", REFUSAL_STEP_STAND_IN]],
+      );
+    });
+
+    it("leaves the user's own message and an absent step alone", () => {
+      const own = { ...items[0]!, nativeItemId: "prompt" };
+      assert.equal(
+        claudeTranscriptAnnotated(
+          transcript,
+          { item: own, items: [own], annotate: true },
+          providerThreadId,
+        ),
+        "not-a-step",
+      );
+      const edit = annotateAt(5);
+      assert.isNull(
+        claudeTranscriptAnnotated(
+          edit.lines.filter((line) => !line.includes('"response-3"')),
+          { item: items[4]!, items: [items[4]!], annotate: true },
+          providerThreadId,
+        ),
+      );
+    });
   });
 });
