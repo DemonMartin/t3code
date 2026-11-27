@@ -118,4 +118,27 @@ describe("RefusalRecoveryRow", () => {
       refusalRecovery: { ...state.refusalRecovery, providers: { claude: { enabled: false } } },
     });
   });
+
+  it("defaults to rewriting the refused step and offers the harder cuts", async () => {
+    enabled();
+    state.updateSettings.mockReset();
+    await using screen = await render(<RefusalRecoveryRow />, { router: false });
+
+    const mode = screen.getByRole("combobox", { name: "What a repair does with the refused step" });
+    await expect.element(mode).toHaveTextContent("Rewrite the refused step");
+    await mode.click();
+    expect(page.getByRole("option", { name: "Drop the refused answer" })).toBeInTheDocument();
+    await page.getByRole("option", { name: "Drop the whole turn" }).click();
+    expect(state.updateSettings).toHaveBeenLastCalledWith({
+      refusalRecovery: {
+        ...state.refusalRecovery,
+        repair: { ...state.refusalRecovery.repair!, cutMode: "drop-whole-turn" },
+      },
+    });
+
+    // The handoff model follows the other provider unless one is named.
+    await expect
+      .element(screen.getByRole("combobox", { name: "Handoff model" }))
+      .toHaveTextContent("Other provider's first model");
+  });
 });

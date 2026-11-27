@@ -660,7 +660,15 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/labs",
     targetId: "refusal-recovery",
     scope: "environment",
-    searchTerms: [msg("revert retry rung handoff cut")],
+    searchTerms: [msg("revert retry rung handoff cut rewrite annotate")],
+  },
+  {
+    id: "refusal-handoff",
+    title: msg("Handoff model"),
+    to: "/settings/labs",
+    targetId: "refusal-repair",
+    scope: "environment",
+    searchTerms: [msg("switch provider model fallback pin")],
   },
   {
     id: "refusal-providers",

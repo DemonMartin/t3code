@@ -1,4 +1,7 @@
 import { msg } from "gt-react";
+import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
+import { useEnvironmentProviders } from "../../state/environments";
+import { providerInstanceEntriesFor } from "../../providerInstances";
 import { managedCapabilityDenial } from "@t3tools/client-runtime/contract-labels";
 import { useAuth } from "@clerk/react";
 import { Link } from "@tanstack/react-router";
@@ -6,6 +9,8 @@ import {
   AgentFeedbackMode,
   DEFAULT_WORKFLOW_SKIPPED_RUNS_KEPT,
   MAX_WORKFLOW_SKIPPED_RUNS_KEPT,
+  ModelSelection,
+  ProviderInstanceId,
   type RefusalRecoverySettings,
 } from "@t3tools/contracts";
 import { T, useGT, useMessages } from "gt-react";
@@ -250,7 +255,7 @@ export function RefusalRecoveryRow() {
       {...searchableSetting("refusal-recovery")}
       settingKeys={["refusalRecovery"]}
       description={gt(
-        "Work around a provider refusing a request: strip its trigger strings, steer the system prompt and the task framing, then revert a refusal and continue. Off sends exactly what this server sent before.",
+        "Work around a provider refusing a request: strip its trigger strings, steer the system prompt and the task framing, then repair a refusal in place and continue. Off sends exactly what this server sent before.",
       )}
       control={
         <ScopedSwitch
@@ -285,6 +290,7 @@ const REFUSAL_OVERRIDE_MODES = [
 ] as const;
 
 const REFUSAL_CUT_MODES = [
+  ["annotate", msg("Rewrite the refused step")],
   ["drop-refusal-only", msg("Drop the refused answer")],
   ["drop-whole-turn", msg("Drop the whole turn")],
 ] as const;
@@ -400,7 +406,7 @@ function RefusalEnvelopeRow(props: {
       {...searchableSetting("refusal-envelope")}
       className="px-0 py-2 sm:px-0"
       description={gt(
-        "Wrap a request that trips two or more refusal areas in a short scope block, so the model sees what is being asked and why.",
+        "Wrap a request that trips a refusal area in a short scope block, so the model sees what is being asked and why.",
       )}
       resetAction={
         enabled ? null : (
@@ -414,7 +420,7 @@ function RefusalEnvelopeRow(props: {
         <Switch
           checked={enabled}
           onCheckedChange={(checked) => props.update({ envelope: { enabled: Boolean(checked) } })}
-          aria-label={gt("Frame multi-area requests")}
+          aria-label={gt("Frame refusal-area requests")}
         />
       }
     />
@@ -490,14 +496,14 @@ function RefusalRepairRow(props: {
       {...searchableSetting("refusal-repair")}
       className="px-0 py-2 sm:px-0"
       description={gt(
-        "Revert a refused answer and continue with a different wording, up to three times, then hand the thread to the other provider for about an hour.",
+        "Keep the refused step but rewrite it: its text becomes a short stand-in, its tool results become errors, and the agent continues from there instead of starting over.",
       )}
       resetAction={
-        repair.enabled && repair.cutMode === "drop-refusal-only" ? null : (
+        repair.enabled && repair.cutMode === "annotate" ? null : (
           <SettingResetButton
             ariaLabel={gt("Reset refusal repair to default")}
             onClick={() =>
-              props.update({ repair: { ...repair, enabled: true, cutMode: "drop-refusal-only" } })
+              props.update({ repair: { ...repair, enabled: true, cutMode: "annotate" } })
             }
           />
         )
@@ -512,7 +518,7 @@ function RefusalRepairRow(props: {
             }}
           >
             <SelectTrigger
-              aria-label={gt("What a repair removes")}
+              aria-label={gt("What a repair does with the refused step")}
               size="sm"
               className="w-full sm:w-52"
             >
@@ -536,6 +542,105 @@ function RefusalRepairRow(props: {
             aria-label={gt("Repair refusals")}
           />
         </div>
+      }
+    >
+      {repair.enabled ? (
+        <div className="mt-2 mb-2 border-l-2 border-border/60 ps-3">
+          <RefusalHandoffRow repair={repair} update={props.update} />
+        </div>
+      ) : null}
+    </SettingsRow>
+  );
+}
+
+/**
+ * Where a handoff goes. Left alone, the other provider's first model is used, which is the
+ * first model of the first enabled instance of it.
+ */
+function RefusalHandoffRow(props: {
+  readonly repair: RefusalSettings["repair"];
+  readonly update: RefusalSettingsUpdate;
+}) {
+  const searchableSetting = useSearchableSetting();
+  const gt = useGT();
+  const m = useMessages();
+  const settings = useScopedSettings();
+  // The row also renders outside a settings page (tests, embedded panels), so the scope is optional.
+  const scope = useOptionalSettingsScope();
+  const providersByEnvironment = useEnvironmentProviders();
+  const environment = scope?.environment ?? null;
+  const providers =
+    (environment?.serverConfig
+      ? providersByEnvironment.get(environment.environmentId)
+      : undefined) ?? EMPTY_SERVER_PROVIDERS;
+  const entries = providerInstanceEntriesFor(
+    providers,
+    settings,
+    scope?.target?.projectId ?? null,
+  ).filter((entry) => entry.enabled && entry.isAvailable);
+  const chosen = props.repair.handoffModelSelection;
+  const optionOf = (instanceId: string, model: string) => `${instanceId}\u0000${model}`;
+  const options = entries.flatMap((entry) =>
+    entry.models.map((model) => ({
+      value: optionOf(entry.instanceId, model.slug),
+      label: `${entry.displayName} · ${model.slug}`,
+    })),
+  );
+  const chosenOption = options.find(
+    (option) => option.value === optionOf(chosen?.instanceId ?? "", chosen?.model ?? ""),
+  );
+  return (
+    <SettingsRow
+      {...searchableSetting("refusal-handoff")}
+      className="px-0 py-2 sm:px-0"
+      description={gt(
+        "The model the third rung hands off to. Left unset, it is the other provider's first model; the thread returns to its previous model when the hour is up.",
+      )}
+      resetAction={
+        chosen === null ? null : (
+          <SettingResetButton
+            ariaLabel={gt("Reset handoff model to default")}
+            onClick={() =>
+              props.update({ repair: { ...props.repair, handoffModelSelection: null } })
+            }
+          />
+        )
+      }
+      control={
+        <Select
+          value={chosenOption?.value ?? ""}
+          onValueChange={(next) => {
+            if (next === null) return;
+            if (next === "") {
+              props.update({ repair: { ...props.repair, handoffModelSelection: null } });
+              return;
+            }
+            const separator = next.indexOf("\u0000");
+            props.update({
+              repair: {
+                ...props.repair,
+                handoffModelSelection: ModelSelection.make({
+                  instanceId: ProviderInstanceId.make(next.slice(0, separator)),
+                  model: next.slice(separator + 1),
+                }),
+              },
+            });
+          }}
+        >
+          <SelectTrigger aria-label={gt("Handoff model")} size="sm" className="w-full sm:w-52">
+            <SelectValue>{chosenOption?.label ?? m("Other provider's first model")}</SelectValue>
+          </SelectTrigger>
+          <SelectPopup align="end" alignItemWithTrigger={false}>
+            <SelectItem hideIndicator value="">
+              {m("Other provider's first model")}
+            </SelectItem>
+            {options.map((option) => (
+              <SelectItem key={option.value} hideIndicator value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
       }
     />
   );
