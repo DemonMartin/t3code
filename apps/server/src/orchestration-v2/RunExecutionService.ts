@@ -876,11 +876,13 @@ export const layer: Layer.Layer<
           `command:effect:checkpoint.capture:${input.run.id}`,
         );
         // Stopped runs capture rollback points for the next message; enqueue before later starts on this effect lane.
+        // A failed run gets one too: its steps can be rewound to, and the next message can go back to it.
         const finalization = {
           effects:
             input.terminal.status === "completed" ||
             input.terminal.status === "interrupted" ||
-            input.terminal.status === "cancelled"
+            input.terminal.status === "cancelled" ||
+            input.terminal.status === "failed"
               ? [
                   {
                     id: `effect:checkpoint.capture:${input.run.id}`,

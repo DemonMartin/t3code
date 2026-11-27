@@ -79,7 +79,10 @@ export const layer: Layer.Layer<
         context;
       // Runs settle before capture; `waiting` is a run persisted before captures ran after settling.
       const settled =
-        run?.status === "completed" || run?.status === "interrupted" || run?.status === "cancelled";
+        run?.status === "completed" ||
+        run?.status === "interrupted" ||
+        run?.status === "cancelled" ||
+        run?.status === "failed";
 
       // A checkpoint on a settled run proves this at-least-once effect already committed.
       if (run !== undefined && run.checkpointId !== null && settled) {
@@ -257,7 +260,8 @@ export const layer: Layer.Layer<
             !legacyWaiting &&
             currentRun.status !== "completed" &&
             currentRun.status !== "interrupted" &&
-            currentRun.status !== "cancelled"
+            currentRun.status !== "cancelled" &&
+            currentRun.status !== "failed"
           ) {
             return;
           }

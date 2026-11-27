@@ -41,6 +41,7 @@ Upstream can go back to one of your own messages ("Edit from here"). The fork ad
 | **Agent's view** (eye, in the header) | Nothing: it only changes what the chat shows           | The chat shows just the steps the thread's current agent has in its context; click again for the whole thread |
 
 - A step is one model response: its thinking, text and tool calls with their results leave together. Hovering a tool call and rewinding or cutting therefore also takes the thinking that led to it.
+- A turn that failed (an API error, a refusal) keeps a rollback point like any other, so its steps can be rewound to and the next message can go back to it. Upstream saves none for a failed turn.
 - Files are never changed by a rewind or a cut, because file snapshots exist per turn. To also restore files, use "Edit from here" on your message.
 - Supported by OpenCode 2 and Claude Code. Codex can only revert whole turns, so its steps show no icons; other agents likewise. Whether a turn's steps show the icons depends on the agent that ran that turn, not the current one.
 - A rewind (any of them, "Edit from here" on a message included) to a turn another agent ran switches the thread back to that agent and the model it used, and continues that agent's own conversation from there. Every other agent whose conversation holds a turn the rewind discards starts over the next time it is used, from a full handoff of what is left; its session is closed.

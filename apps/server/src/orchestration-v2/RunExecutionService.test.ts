@@ -3219,6 +3219,20 @@ it.effect.each([
     }),
 );
 
+it.effect("captures a rollback point for a failed run, so its steps can be rewound to", () =>
+  Effect.gen(function* () {
+    const { committedEffects } = yield* captureRootRunTermination({
+      key: "failed-capture",
+      shouldFinalizeRun: () => Effect.succeed(true),
+      events: (ids) => Stream.make(rootTerminalEvent(ids, "failed")),
+    });
+    assert.deepEqual(
+      committedEffects.map((effect) => effect.request.type),
+      ["checkpoint.capture"],
+    );
+  }),
+);
+
 it.effect("keeps a provider's stop reason on a completed run", () =>
   Effect.gen(function* () {
     const reason = "sessionStart hook (user): Plugin guard blocked this session.";
