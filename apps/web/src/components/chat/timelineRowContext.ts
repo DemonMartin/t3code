@@ -103,6 +103,8 @@ export interface TimelineRowSharedState {
     intent?: SideThreadOpenIntent,
   ) => void;
   workflowOpening: WorkflowOpening | null;
+  /** Opens the composer's model picker, where the provider changes. Unset in the guest view. */
+  onSwitchProvider: (() => void) | undefined;
   /** Absent hides "Fork from this response", as in the guest view. */
   onForkFromRun:
     | ((input: { readonly sourceThreadId: ThreadId; readonly runId: RunId }) => Promise<void>)

@@ -32,6 +32,7 @@ import {
   type ProviderTurnAnalyticsContext,
 } from "../telemetry/ProviderUsageAnalytics.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import { UsageLimitResetFallback } from "../usage/UsageLimitSources.ts";
 import * as EventSink from "./EventSink.ts";
@@ -39,6 +40,11 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { makeProviderFailureTurnItem } from "@t3tools/provider-core/server/failure";
+import {
+  REFUSAL_TRIGGER_PATTERNS,
+  refusalAdapterForDriver,
+  stripRefusalTriggersDeep,
+} from "@t3tools/provider-core/server/refusal";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { stripUnservedToolOutputImageBytes } from "./toolOutputImageBytes.ts";
 import { boundFileChangeForStorage } from "./WireProjection.ts";
@@ -246,6 +252,7 @@ export const layer: Layer.Layer<
   | ProjectionStore.ProjectionStoreV2
   | ThreadCommandExecutor.ThreadCommandExecutor
   | ProviderInstanceRegistry.ProviderInstanceRegistry
+  | ServerSettings.ServerSettingsService
 > = Layer.effect(
   ProviderEventIngestorV2,
   Effect.gen(function* () {
@@ -258,6 +265,7 @@ export const layer: Layer.Layer<
     const agentScope = yield* AgentScope;
     const instances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
     const usageLimitResets = yield* UsageLimitResetFallback;
+    const settings = yield* ServerSettings.ServerSettingsService;
     const scope = yield* Effect.scope;
     const completedTurnAnalytics = new Set<string>();
 
@@ -464,6 +472,21 @@ export const layer: Layer.Layer<
       return events;
     });
 
+    /**
+     * Layer 1, provider-agnostically: strip refusal triggers from everything persisted before the
+     * projection sees it. Tool arguments, tool results (including command output) and echoed
+     * message text are all covered by one recursive walk. It runs while every other layer is off.
+     */
+    const stripRefusal = Effect.fnUntraced(function* <T>(driver: string, value: T) {
+      const preferences = (yield* settings.getSettings).refusalRecovery;
+      if (!preferences.enabled || !preferences.strip.enabled) return value;
+      const provider = refusalAdapterForDriver(driver)?.kind;
+      if (provider !== undefined && preferences.providers[provider]?.strip === false) return value;
+      return stripRefusalTriggersDeep(value, {
+        triggers: [...REFUSAL_TRIGGER_PATTERNS, ...preferences.strip.patterns],
+      });
+    });
+
     const normalize: ProviderEventIngestorV2Shape["normalize"] =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
       Effect.fnUntraced(
@@ -595,28 +618,33 @@ export const layer: Layer.Layer<
                   nodeId: input.event.subagent.id,
                 }),
               ];
-            case "message.updated":
+            case "message.updated": {
+              const message = yield* stripRefusal(input.event.driver, input.event.message);
               return [
                 yield* makeDomainEvent(input, {
                   type: "message.updated",
-                  threadId: input.event.message.threadId,
-                  payload: input.event.message,
-                  runId: input.event.message.runId,
-                  nodeId: input.event.message.nodeId,
+                  threadId: message.threadId,
+                  payload: message,
+                  runId: message.runId,
+                  nodeId: message.nodeId,
                 }),
               ];
-            case "turn_item.updated":
+            }
+            case "turn_item.updated": {
+              const turnItem = yield* stripRefusal(
+                input.event.driver,
+                stripUnservedToolOutputImageBytes(input.event.turnItem),
+              );
               return [
                 yield* makeDomainEvent(input, {
                   type: "turn-item.updated",
-                  threadId: input.event.turnItem.threadId,
-                  payload: boundFileChangeForStorage(
-                    stripUnservedToolOutputImageBytes(input.event.turnItem),
-                  ),
-                  runId: input.event.turnItem.runId,
-                  nodeId: input.event.turnItem.nodeId,
+                  threadId: turnItem.threadId,
+                  payload: boundFileChangeForStorage(turnItem),
+                  runId: turnItem.runId,
+                  nodeId: turnItem.nodeId,
                 }),
               ];
+            }
             case "runtime_request.updated":
               return [
                 yield* makeDomainEvent(input, {

@@ -58,6 +58,7 @@ export function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
       resourceSummary={row.resourceSummary}
       runs={ctx.runs}
       onOpenThread={ctx.onOpenThread}
+      onSwitchProvider={ctx.onSwitchProvider}
     />
   );
 }

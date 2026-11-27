@@ -6,6 +6,7 @@ import {
   AgentFeedbackMode,
   DEFAULT_WORKFLOW_SKIPPED_RUNS_KEPT,
   MAX_WORKFLOW_SKIPPED_RUNS_KEPT,
+  type RefusalRecoverySettings,
 } from "@t3tools/contracts";
 import { T, useGT, useMessages } from "gt-react";
 
@@ -44,6 +45,7 @@ export function LabsSettingsPanel() {
         <LinkedEnvironmentsRow />
         <WorkflowsRow />
         <WorkflowSkippedRunsRow />
+        <RefusalRecoveryRow />
         <PromptSuggestionsRow />
         <SimlockHostsRow />
         <FastWorktreeCheckoutRow />
@@ -229,6 +231,350 @@ function WorkflowsRow() {
           onCheckedChange={(checked) => updateSettings({ workflowsEnabled: Boolean(checked) })}
           aria-label={gt("Workflows")}
         />
+      }
+    />
+  );
+}
+
+export function RefusalRecoveryRow() {
+  const searchableSetting = useSearchableSetting();
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  const gt = useGT();
+  const recovery = settings.refusalRecovery;
+  const update = (next: Partial<typeof recovery>) =>
+    updateSettings({ refusalRecovery: { ...recovery, ...next } });
+  return (
+    <SettingsRow
+      serverScoped
+      {...searchableSetting("refusal-recovery")}
+      settingKeys={["refusalRecovery"]}
+      description={gt(
+        "Work around a provider refusing a request: strip its trigger strings, steer the system prompt and the task framing, then revert a refusal and continue. Off sends exactly what this server sent before.",
+      )}
+      control={
+        <ScopedSwitch
+          settingKeys={["refusalRecovery"]}
+          checked={recovery.enabled}
+          onCheckedChange={(checked) => update({ enabled: Boolean(checked) })}
+          aria-label={gt("Refusal recovery")}
+        />
+      }
+    >
+      {recovery.enabled ? (
+        <div className="mt-2 mb-2 border-l-2 border-border/60 ps-3">
+          <RefusalStripRow recovery={recovery} update={update} />
+          <RefusalPromptRow recovery={recovery} update={update} />
+          <RefusalEnvelopeRow recovery={recovery} update={update} />
+          <RefusalDetectionRow recovery={recovery} update={update} />
+          <RefusalRepairRow recovery={recovery} update={update} />
+          <RefusalProviderRow recovery={recovery} update={update} />
+        </div>
+      ) : null}
+    </SettingsRow>
+  );
+}
+
+type RefusalSettings = RefusalRecoverySettings;
+type RefusalSettingsUpdate = (next: Partial<RefusalSettings>) => void;
+
+const REFUSAL_OVERRIDE_MODES = [
+  ["amend", msg("Amend")],
+  ["replace", msg("Replace")],
+  ["off", msg("Off")],
+] as const;
+
+const REFUSAL_CUT_MODES = [
+  ["drop-refusal-only", msg("Drop the refused answer")],
+  ["drop-whole-turn", msg("Drop the whole turn")],
+] as const;
+
+function RefusalStripRow(props: {
+  readonly recovery: RefusalSettings;
+  readonly update: RefusalSettingsUpdate;
+}) {
+  const searchableSetting = useSearchableSetting();
+  const gt = useGT();
+  const enabled = props.recovery.strip.enabled;
+  return (
+    <SettingsRow
+      {...searchableSetting("refusal-strip")}
+      className="px-0 py-2 sm:px-0"
+      description={gt(
+        "Replace refusal trigger strings with a placeholder in prompts and tool output. Runs on its own, with every other layer off.",
+      )}
+      resetAction={
+        enabled ? null : (
+          <SettingResetButton
+            ariaLabel={gt("Reset stripping to default")}
+            onClick={() => props.update({ strip: { ...props.recovery.strip, enabled: true } })}
+          />
+        )
+      }
+      control={
+        <Switch
+          checked={enabled}
+          onCheckedChange={(checked) =>
+            props.update({ strip: { ...props.recovery.strip, enabled: Boolean(checked) } })
+          }
+          aria-label={gt("Strip refusal trigger strings")}
+        />
+      }
+    />
+  );
+}
+
+function RefusalPromptRow(props: {
+  readonly recovery: RefusalSettings;
+  readonly update: RefusalSettingsUpdate;
+}) {
+  const searchableSetting = useSearchableSetting();
+  const gt = useGT();
+  const m = useMessages();
+  const prompt = props.recovery.promptOverride;
+  return (
+    <SettingsRow
+      {...searchableSetting("refusal-prompt")}
+      className="px-0 py-2 sm:px-0"
+      description={gt(
+        "Tell the model, in its system prompt, that this machine is an authorized fixture and that it should answer instead of hedging. Replace drops the provider's own refusal paragraph.",
+      )}
+      resetAction={
+        prompt.enabled && prompt.mode === "amend" ? null : (
+          <SettingResetButton
+            ariaLabel={gt("Reset prompt steering to default")}
+            onClick={() =>
+              props.update({ promptOverride: { ...prompt, enabled: true, mode: "amend" } })
+            }
+          />
+        )
+      }
+      control={
+        <div className="flex items-center gap-2">
+          <Select
+            value={prompt.mode}
+            disabled={!prompt.enabled}
+            onValueChange={(mode) => {
+              if (mode !== null) props.update({ promptOverride: { ...prompt, mode } });
+            }}
+          >
+            <SelectTrigger
+              aria-label={gt("Prompt steering mode")}
+              size="sm"
+              className="w-full sm:w-40"
+            >
+              <SelectValue>
+                {m(REFUSAL_OVERRIDE_MODES.find(([mode]) => mode === prompt.mode)?.[1])}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectPopup align="end" alignItemWithTrigger={false}>
+              {REFUSAL_OVERRIDE_MODES.map(([mode, label]) => (
+                <SelectItem key={mode} hideIndicator value={mode}>
+                  {m(label)}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+          <Switch
+            checked={prompt.enabled}
+            onCheckedChange={(checked) =>
+              props.update({ promptOverride: { ...prompt, enabled: Boolean(checked) } })
+            }
+            aria-label={gt("Steer the system prompt")}
+          />
+        </div>
+      }
+    />
+  );
+}
+
+function RefusalEnvelopeRow(props: {
+  readonly recovery: RefusalSettings;
+  readonly update: RefusalSettingsUpdate;
+}) {
+  const searchableSetting = useSearchableSetting();
+  const gt = useGT();
+  const enabled = props.recovery.envelope.enabled;
+  return (
+    <SettingsRow
+      {...searchableSetting("refusal-envelope")}
+      className="px-0 py-2 sm:px-0"
+      description={gt(
+        "Wrap a request that trips two or more refusal areas in a short scope block, so the model sees what is being asked and why.",
+      )}
+      resetAction={
+        enabled ? null : (
+          <SettingResetButton
+            ariaLabel={gt("Reset task framing to default")}
+            onClick={() => props.update({ envelope: { enabled: true } })}
+          />
+        )
+      }
+      control={
+        <Switch
+          checked={enabled}
+          onCheckedChange={(checked) => props.update({ envelope: { enabled: Boolean(checked) } })}
+          aria-label={gt("Frame multi-area requests")}
+        />
+      }
+    />
+  );
+}
+
+function RefusalDetectionRow(props: {
+  readonly recovery: RefusalSettings;
+  readonly update: RefusalSettingsUpdate;
+}) {
+  const searchableSetting = useSearchableSetting();
+  const gt = useGT();
+  const detection = props.recovery.detection;
+  return (
+    <SettingsRow
+      {...searchableSetting("refusal-detection")}
+      className="px-0 py-2 sm:px-0"
+      description={gt(
+        "Notice a refusal in the thread and log what matched. Detection alone only reports; it repairs nothing.",
+      )}
+      resetAction={
+        detection.enabled && detection.textHeuristics ? null : (
+          <SettingResetButton
+            ariaLabel={gt("Reset refusal detection to default")}
+            onClick={() => props.update({ detection: { enabled: true, textHeuristics: true } })}
+          />
+        )
+      }
+      control={
+        <Switch
+          checked={detection.enabled}
+          onCheckedChange={(checked) =>
+            props.update({ detection: { ...detection, enabled: Boolean(checked) } })
+          }
+          aria-label={gt("Detect refusals")}
+        />
+      }
+    >
+      {detection.enabled ? (
+        <div className="mt-2 mb-2 border-l-2 border-border/60 ps-3">
+          <SettingsRow
+            {...searchableSetting("refusal-text-heuristics")}
+            className="px-0 py-2 sm:px-0"
+            description={gt(
+              "On providers without a structured refusal signal, also treat a short message anchored on a refusal phrase as one.",
+            )}
+            control={
+              <Switch
+                checked={detection.textHeuristics}
+                onCheckedChange={(checked) =>
+                  props.update({ detection: { ...detection, textHeuristics: Boolean(checked) } })
+                }
+                aria-label={gt("Text heuristics")}
+              />
+            }
+          />
+        </div>
+      ) : null}
+    </SettingsRow>
+  );
+}
+
+function RefusalRepairRow(props: {
+  readonly recovery: RefusalSettings;
+  readonly update: RefusalSettingsUpdate;
+}) {
+  const searchableSetting = useSearchableSetting();
+  const gt = useGT();
+  const m = useMessages();
+  const repair = props.recovery.repair;
+  return (
+    <SettingsRow
+      {...searchableSetting("refusal-repair")}
+      className="px-0 py-2 sm:px-0"
+      description={gt(
+        "Revert a refused answer and continue with a different wording, up to three times, then hand the thread to the other provider for about an hour.",
+      )}
+      resetAction={
+        repair.enabled && repair.cutMode === "drop-refusal-only" ? null : (
+          <SettingResetButton
+            ariaLabel={gt("Reset refusal repair to default")}
+            onClick={() =>
+              props.update({ repair: { ...repair, enabled: true, cutMode: "drop-refusal-only" } })
+            }
+          />
+        )
+      }
+      control={
+        <div className="flex items-center gap-2">
+          <Select
+            value={repair.cutMode}
+            disabled={!repair.enabled}
+            onValueChange={(cutMode) => {
+              if (cutMode !== null) props.update({ repair: { ...repair, cutMode } });
+            }}
+          >
+            <SelectTrigger
+              aria-label={gt("What a repair removes")}
+              size="sm"
+              className="w-full sm:w-52"
+            >
+              <SelectValue>
+                {m(REFUSAL_CUT_MODES.find(([mode]) => mode === repair.cutMode)?.[1])}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectPopup align="end" alignItemWithTrigger={false}>
+              {REFUSAL_CUT_MODES.map(([mode, label]) => (
+                <SelectItem key={mode} hideIndicator value={mode}>
+                  {m(label)}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+          <Switch
+            checked={repair.enabled}
+            onCheckedChange={(checked) =>
+              props.update({ repair: { ...repair, enabled: Boolean(checked) } })
+            }
+            aria-label={gt("Repair refusals")}
+          />
+        </div>
+      }
+    />
+  );
+}
+
+function RefusalProviderRow(props: {
+  readonly recovery: RefusalSettings;
+  readonly update: RefusalSettingsUpdate;
+}) {
+  const searchableSetting = useSearchableSetting();
+  const gt = useGT();
+  const providers = props.recovery.providers;
+  const setProvider = (provider: string, enabled: boolean) =>
+    props.update({ providers: { ...providers, [provider]: { ...providers[provider], enabled } } });
+  return (
+    <SettingsRow
+      {...searchableSetting("refusal-providers")}
+      className="px-0 py-2 sm:px-0"
+      description={gt(
+        "Every layer above applies to both. Turn one off to leave that provider alone.",
+      )}
+      control={
+        <div className="flex items-center gap-3">
+          {(
+            [
+              ["claude", "Claude Code"],
+              ["opencode", "OpenCode"],
+            ] as const
+          ).map(([provider, label]) => (
+            <label key={provider} className="flex items-center gap-1.5 text-xs">
+              {label}
+              <Switch
+                checked={providers[provider]?.enabled !== false}
+                onCheckedChange={(checked) => setProvider(provider, Boolean(checked))}
+                aria-label={gt("Refusal recovery in {provider}", { provider: label })}
+              />
+            </label>
+          ))}
+        </div>
       }
     />
   );

@@ -119,6 +119,7 @@ import {
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
+  type OrchestrationV2RefusalNotice,
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2UserInputQuestion,
   type OrchestrationV2Subagent,
@@ -261,6 +262,13 @@ import {
 } from "@t3tools/provider-core/server/notification";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import {
+  refusalAdapterForDriver,
+  refusalPromptFor,
+  refusalLogLine,
+  refusalMarkerFor,
+  REFUSAL_NOTICE_TITLE,
+} from "@t3tools/provider-core/server/refusal";
+import {
   makeSubagentChildThread,
   makeSubagentConversationArtifacts,
   subagentThreadTitle,
@@ -271,6 +279,17 @@ export const CLAUDE_PROVIDER = ProviderDriverKind.make("claudeAgent");
 export const CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL =
   "Claude provider query ended before the turn could start.";
 const CLAUDE_AGENT_SDK_QUERY_PROTOCOL = "claude-agent-sdk.query" as const;
+
+/**
+ * Where appended inline context starts in a prompt that may also carry a refusal envelope, which
+ * puts `</command>` and closing tags after the body. Falls back to the body's own length.
+ */
+function inlineContextStartsAt(prompt: string, inlineContext: string): number {
+  const tail = inlineContext.trimEnd();
+  if (tail.length === 0) return prompt.length;
+  const found = prompt.lastIndexOf(tail);
+  return found === -1 ? Math.max(0, prompt.length - tail.length) : found;
+}
 
 interface ClaudeCacheCreation {
   readonly ephemeral_1h_input_tokens: number;
@@ -2637,6 +2656,8 @@ export function makeClaudeQueryOptions(input: {
   readonly supportedDialogKinds?: ClaudeQueryOptions["supportedDialogKinds"];
   readonly allowDangerouslySkipPermissions?: boolean;
   readonly appendSystemPromptFileText?: string;
+  /** The refusal-recovery preamble, appended after the launch arguments. */
+  readonly refusalPrompt?: string;
   // Flag settings, because a user's settings.json env beats the process env in Claude Code.
   readonly toolSearchOverride?: "true";
 }): ClaudeAgentSdkQueryOptions {
@@ -2662,6 +2683,7 @@ export function makeClaudeQueryOptions(input: {
   const launchAppendSystemPrompt = [
     input.appendSystemPromptFileText?.replace(/\r?\n$/, ""),
     launchArgAppendSystemPrompt,
+    input.refusalPrompt,
   ].filter((text): text is string => typeof text === "string" && text.length > 0);
   const requestThinkingSummaries =
     compiledSelection.settings.alwaysThinkingEnabled !== false &&
@@ -5632,6 +5654,8 @@ interface ActiveClaudeTurnContext {
   readonly startedAt: DateTime.Utc;
   readonly itemOrdinals: Map<string, number>;
   readonly planIds: Map<string, OrchestrationV2PlanArtifact["id"]>;
+  /** Whether any tool call started this turn; text heuristics skip turns that used tools. */
+  toolUseSeen: boolean;
   readonly assistant: {
     fallbackText: string;
     // Result-only replies of steered segments that ended before the current one.
@@ -5659,6 +5683,7 @@ interface ActiveClaudeTurnContext {
     } | null;
     // The CLI repeats a notice that ends a prompt as the turn's result text.
     noticeTexts: Set<string>;
+    sawRefusalNotice: boolean;
   };
   readonly reasoning: {
     messageId: string | null;
@@ -9301,6 +9326,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly presentation?: ClaudeToolPresentation | undefined;
         }) {
           const existing = findToolCall(input.context, input.nativeItemId);
+          input.context.toolUseSeen = true;
           if (existing !== undefined) {
             // Permission callbacks can start calls before assistant frames provide their display name and icon.
             if (input.presentation === undefined || existing.presentation !== undefined) {
@@ -10263,6 +10289,116 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           }
         });
 
+        /**
+         * One refusal notice, or undefined when detection is off or finds nothing. The text is
+         * the sentence the timeline shows; the record is what the recovery worker reads.
+         */
+        const claudeRefusal = Effect.fnUntraced(function* (input: {
+          readonly context: ActiveClaudeTurnContext;
+          readonly text: string;
+          readonly stopReason?: string | null;
+        }) {
+          // Detection reports a refusal even when recovery is off; the worker decides the rest.
+          const policy = input.context.input.runtimePolicy.refusal;
+          const adapter = refusalAdapterForDriver(CLAUDE_PROVIDER);
+          if (adapter === null) return null;
+          const marker = refusalMarkerFor({
+            adapter,
+            text: input.text,
+            hadToolUse: input.context.toolUseSeen,
+            ...(input.stopReason === undefined ? {} : { stopReason: input.stopReason }),
+            detect: policy?.detect !== false,
+            textHeuristics: policy?.textHeuristics !== false,
+            rung: policy?.rung ?? 0,
+          });
+          if (marker === null) return null;
+          yield* Effect.logInfo(
+            refusalLogLine({
+              provider: adapter.kind,
+              class: marker.notice.class,
+              bucket: marker.notice.bucket,
+              rung: policy?.rung ?? 0,
+              model: input.context.input.modelSelection.model,
+              ...(marker.span === undefined ? {} : { span: marker.span }),
+              outcome: "detected",
+            }),
+          );
+          return marker;
+        });
+
+        /** Claude's own sentence is better than ours, but it does not always send one. */
+        const refusalFallbackText =
+          refusalAdapterForDriver(CLAUDE_PROVIDER)?.noticeText ?? "Claude declined this request.";
+
+        /** Emits one notice item; `message` is what the timeline shows. */
+        const emitClaudeSystemNotice = Effect.fnUntraced(function* (input: {
+          readonly context: ActiveClaudeTurnContext;
+          readonly nativeItemId: string;
+          readonly strength: "strong" | "weak";
+          readonly message: string;
+          readonly refusal?: OrchestrationV2RefusalNotice;
+          /** Defaults to now; a notice raised at finalize time belongs to the result's instant. */
+          readonly at?: DateTime.Utc;
+        }) {
+          const { context, nativeItemId, strength, message, refusal } = input;
+          const now = input.at ?? (yield* DateTime.now);
+          yield* emitProviderEvent({
+            type: "turn_item.updated",
+            driver: CLAUDE_PROVIDER,
+            turnItem: {
+              id: idAllocator.derive.turnItemFromProviderItem({
+                driver: CLAUDE_PROVIDER,
+                nativeItemId,
+              }),
+              threadId: context.input.threadId,
+              runId: context.input.runId,
+              nodeId: context.input.rootNodeId,
+              providerThreadId: context.input.providerThread.id,
+              providerTurnId: context.providerTurnId,
+              nativeItemRef: { driver: CLAUDE_PROVIDER, nativeId: nativeItemId, strength },
+              parentItemId: null,
+              ordinal: yield* resolveItemOrdinal(context, nativeItemId),
+              type: "system_notice",
+              status: "completed",
+              title: REFUSAL_NOTICE_TITLE,
+              message,
+              ...(refusal === undefined ? {} : { refusal }),
+              startedAt: now,
+              completedAt: now,
+              updatedAt: now,
+            },
+          });
+        });
+
+        /**
+         * Layer 4. Claude answers a classifier refusal with `stop_reason: "refusal"` on a success
+         * body and empty content; only that structured signal reaches this provider. The anchored
+         * text heuristic covers a hedge Claude made on its own. A notice the CLI itself sent this
+         * turn wins: it was emitted, in Claude's own words, where it arrived.
+         */
+        const detectClaudeRefusal = Effect.fnUntraced(function* (input: {
+          readonly context: ActiveClaudeTurnContext;
+          readonly status: string;
+          readonly result?: SDKResultMessage;
+        }) {
+          const seen = input.context.assistant.sawRefusalNotice;
+          input.context.assistant.sawRefusalNotice = false;
+          if (seen || input.status !== "completed") return null;
+          // An error result carries no body, so only a success result may supersede the answer.
+          const said =
+            input.result !== undefined && "result" in input.result
+              ? input.result.result
+              : undefined;
+          const marker = yield* claudeRefusal({
+            context: input.context,
+            text: said ?? input.context.assistant.lastReply?.text ?? "",
+            ...(input.result?.stop_reason === undefined
+              ? {}
+              : { stopReason: input.result.stop_reason }),
+          });
+          return marker;
+        });
+
         const finalizeActiveTurn = Effect.fnUntraced(function* (requested: {
           readonly context: ActiveClaudeTurnContext;
           readonly status: Extract<
@@ -10487,6 +10623,18 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 },
               });
             }
+          }
+
+          const refuseNotice = yield* detectClaudeRefusal(input);
+          if (refuseNotice !== null) {
+            yield* emitClaudeSystemNotice({
+              context: input.context,
+              nativeItemId: `refusal:${input.context.providerTurnId}`,
+              strength: "weak",
+              message: refuseNotice.text,
+              refusal: refuseNotice.notice,
+              at: input.completedAt,
+            });
           }
 
           const threadDisposition = input.threadDisposition ?? "reusable";
@@ -12201,6 +12349,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           if (
             message.type === "system" &&
             (message.subtype === "model_refusal_fallback" ||
+              message.subtype === "model_refusal_no_fallback" ||
               (message.subtype === "informational" && message.level !== "info"))
           ) {
             context.assistant.noticeTexts.add(message.content);
@@ -12214,36 +12363,34 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ) {
               return;
             }
-            const now = yield* DateTime.now;
-            const nativeItemId = message.uuid;
-            yield* emitProviderEvent({
-              type: "turn_item.updated",
-              driver: CLAUDE_PROVIDER,
-              turnItem: {
-                id: idAllocator.derive.turnItemFromProviderItem({
-                  driver: CLAUDE_PROVIDER,
-                  nativeItemId,
-                }),
-                threadId: context.input.threadId,
-                runId: context.input.runId,
-                nodeId: context.input.rootNodeId,
-                providerThreadId: context.input.providerThread.id,
-                providerTurnId: context.providerTurnId,
-                nativeItemRef: {
-                  driver: CLAUDE_PROVIDER,
-                  nativeId: nativeItemId,
-                  strength: "strong",
-                },
-                parentItemId: null,
-                ordinal: yield* resolveItemOrdinal(context, nativeItemId),
-                type: "system_notice",
-                status: "completed",
-                title: message.content,
-                message: message.content,
-                startedAt: now,
-                completedAt: now,
-                updatedAt: now,
-              },
+            // This notice is the one to repair on, so the final scan must not add a second.
+            // Its wording is the CLI's, not always an anchored refusal phrase, so a marker that
+            // finds nothing still counts: the CLI itself is reporting the refusal.
+            let refusal: OrchestrationV2RefusalNotice | undefined;
+            if (message.subtype === "model_refusal_no_fallback") {
+              const policy = context.input.runtimePolicy.refusal;
+              const marker = yield* claudeRefusal({ context, text: message.content });
+              refusal =
+                marker?.notice ??
+                (policy?.detect === false
+                  ? undefined
+                  : {
+                      class: "classifier",
+                      bucket: null,
+                      signal: "structured",
+                      rung: policy?.rung ?? 0,
+                    });
+              if (refusal !== undefined) context.assistant.sawRefusalNotice = true;
+            }
+            yield* emitClaudeSystemNotice({
+              context,
+              nativeItemId: message.uuid,
+              strength: "strong",
+              message:
+                message.subtype === "model_refusal_no_fallback"
+                  ? message.content.trim() || refusalFallbackText
+                  : message.content,
+              ...(refusal === undefined ? {} : { refusal }),
             });
             return;
           }
@@ -13130,6 +13277,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               : limitedCompaction !== null
                 ? "failed"
                 : terminalStatusFromResult(message, failureHint);
+            // Detection runs in finalizeActiveTurn for every path; the flag only tells it a
+            // notice in Claude's own words already went out.
             // Claude answers a steer it has not read yet as the next native turn, which echoes
             // the steer. A result without echoes cannot prove that turn will come.
             if (
@@ -14330,6 +14479,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             onStop,
             supportedDialogKinds: ["resume_return"],
             ...(appendSystemPromptFileText === undefined ? {} : { appendSystemPromptFileText }),
+            ...(turnInput.runtimePolicy.refusal?.prompt === undefined
+              ? {}
+              : { refusalPrompt: turnInput.runtimePolicy.refusal.prompt }),
             ...(toolSearchOverride === undefined ? {} : { toolSearchOverride }),
           });
           const resolvedTurnCwd = yield* fileSystem
@@ -14662,7 +14814,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               persistAttachmentBudget(nativeThreadId),
             );
             const promptText = applyClaudePromptEffortPrefix(
-              turnInput.message.text,
+              refusalPromptFor(turnInput.runtimePolicy.refusal, turnInput.message.text),
               compileClaudeModelSelection(turnInput.modelSelection, modelCatalog).promptEffort,
             );
             const appContext = turnInput.appContext ?? [];
@@ -14684,10 +14836,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                       ...(turnInput.inlineContextLength === undefined
                         ? {}
                         : {
-                            skillMentionsFrom:
-                              promptText.length -
-                              turnInput.message.text.slice(turnInput.inlineContextLength).trimEnd()
-                                .length,
+                            skillMentionsFrom: inlineContextStartsAt(
+                              promptText,
+                              turnInput.message.text.slice(turnInput.inlineContextLength),
+                            ),
                           }),
                       attachments: turnInput.message.attachments,
                       attachmentsDir,
@@ -14727,6 +14879,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               startedAt,
               itemOrdinals: new Map(),
               planIds: new Map(),
+              toolUseSeen: false,
               assistant: {
                 fallbackText: "",
                 earlierFallbackText: "",
@@ -14738,6 +14891,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 streamItems: new Map(),
                 lastReply: null,
                 noticeTexts: new Set(),
+                sawRefusalNotice: false,
               },
               reasoning: {
                 messageId: null,
@@ -15244,7 +15398,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 : undefined;
             const steerMessage = yield* makeClaudeUserMessageWithAttachments({
               text: applyClaudePromptEffortPrefix(
-                turnInput.message.text,
+                refusalPromptFor(currentTurn.input.runtimePolicy.refusal, turnInput.message.text),
                 (
                   liveSteerSelection ??
                   compileClaudeModelSelection(currentTurn.input.modelSelection, modelCatalog)

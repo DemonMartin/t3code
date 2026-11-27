@@ -5304,6 +5304,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ...thread,
             ...(command.title === undefined ? {} : { title: command.title, titleRenamed: true }),
             ...(command.limitRecovery === undefined ? {} : { limitRecovery }),
+            ...(command.refusalRecovery === undefined
+              ? {}
+              : { refusalRecovery: command.refusalRecovery }),
             ...(command.limitRecovery !== undefined &&
             limitRecovery?.snooze === true &&
             Date.parse(limitRecovery.resetAt) > DateTime.toEpochMillis(now)
@@ -15371,7 +15374,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ordinal: 0,
           type: "system_notice",
           message: command.text,
-          level: "info",
+          ...(command.refusalParked === true
+            ? { refusalParked: true, level: "warning" as const }
+            : { level: "info" as const }),
           about: "environment",
           status: "completed",
           title: null,

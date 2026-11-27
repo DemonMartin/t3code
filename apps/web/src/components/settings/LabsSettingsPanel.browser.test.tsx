@@ -1,5 +1,6 @@
 import { render } from "../../../test/render";
 import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
+import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
@@ -9,6 +10,7 @@ import type { ScopedSettingsPatch } from "./scopedSettings";
 const state = vi.hoisted(() => ({
   workflowsEnabled: true,
   mixed: false,
+  refusalRecovery: ({} as Partial<typeof DEFAULT_UNIFIED_SETTINGS>["refusalRecovery"])!,
   updateSettings: vi.fn<(patch: ScopedSettingsPatch) => void>(),
 }));
 
@@ -17,16 +19,22 @@ vi.mock(import("./useScopedSettings"), async (original) => ({
   useScopedSettings: (() => ({
     ...DEFAULT_UNIFIED_SETTINGS,
     workflowsEnabled: state.workflowsEnabled,
+    refusalRecovery: state.refusalRecovery,
   })) as never,
   useScopedSettingsMixed: () => state.mixed,
   useUpdateScopedSettings: () => state.updateSettings,
 }));
 vi.mock(import("./settingsLayout"), async (original) => ({
   ...(await original()),
-  SettingsRow: ({ control }) => <div>{control}</div>,
+  SettingsRow: (({ control, children }: { control: ReactNode; children?: ReactNode }) => (
+    <div>
+      {control}
+      {children}
+    </div>
+  )) as never,
 }));
 
-import { WorkflowSkippedRunsRow } from "./LabsSettingsPanel";
+import { RefusalRecoveryRow, WorkflowSkippedRunsRow } from "./LabsSettingsPanel";
 
 describe("WorkflowSkippedRunsRow", () => {
   it("saves the number of skipped runs kept on blur and on Enter", async () => {
@@ -66,5 +74,48 @@ describe("WorkflowSkippedRunsRow", () => {
     state.workflowsEnabled = false;
     await using screen = await render(<WorkflowSkippedRunsRow />, { router: false });
     expect(screen.container.textContent).toBe("");
+  });
+});
+
+describe("RefusalRecoveryRow", () => {
+  const disabled = () => {
+    state.refusalRecovery = { ...DEFAULT_UNIFIED_SETTINGS.refusalRecovery, enabled: false };
+  };
+  const enabled = () => {
+    state.refusalRecovery = { ...DEFAULT_UNIFIED_SETTINGS.refusalRecovery, enabled: true };
+  };
+
+  it("keeps the layers hidden until recovery is on, then saves one switch at a time", async () => {
+    disabled();
+    state.updateSettings.mockReset();
+    await using screen = await render(<RefusalRecoveryRow />, { router: false });
+
+    expect(screen.container.textContent).not.toContain("Strip refusal trigger strings");
+    await userEvent.click(page.getByRole("switch", { name: "Refusal recovery" }));
+    expect(state.updateSettings).toHaveBeenCalledWith({
+      refusalRecovery: { ...state.refusalRecovery, enabled: true },
+    });
+
+    enabled();
+    await screen.rerender(<RefusalRecoveryRow />);
+    await userEvent.click(page.getByRole("switch", { name: "Strip refusal trigger strings" }));
+    expect(state.updateSettings).toHaveBeenLastCalledWith({
+      refusalRecovery: {
+        ...state.refusalRecovery,
+        strip: { ...state.refusalRecovery.strip!, enabled: false },
+      },
+    });
+  });
+
+  it("leaves one provider out without touching the others", async () => {
+    enabled();
+    state.refusalRecovery = { ...state.refusalRecovery, providers: {} };
+    state.updateSettings.mockReset();
+    await using _screen = await render(<RefusalRecoveryRow />, { router: false });
+
+    await userEvent.click(page.getByRole("switch", { name: "Refusal recovery in Claude Code" }));
+    expect(state.updateSettings).toHaveBeenCalledWith({
+      refusalRecovery: { ...state.refusalRecovery, providers: { claude: { enabled: false } } },
+    });
   });
 });

@@ -729,6 +729,9 @@ export default function ChatView(props: ChatViewProps) {
     return inserted;
   };
   const citeAssistantTextStable = useStableCallback(citeAssistantText);
+  const switchProviderStable = useStableCallback(() => {
+    composerRef.current?.openModelPicker();
+  });
   const replyToResponseStable = useStableCallback((response: ResponseContextRecord) => {
     const accepted = composerRef.current?.replyToResponse(response) ?? false;
     if (!accepted) {
@@ -3932,6 +3935,7 @@ export default function ChatView(props: ChatViewProps) {
                   canOperateThread={canOperateThread}
                   threadDetailRef={routeThreadDetailRef}
                   hiddenItemIds={agentViewActive ? outsideAgentContext : null}
+                  onSwitchProvider={switchProviderStable}
                   entriesInput={timelineEntriesInput}
                   draftEntries={isServerThread ? null : draftTimelineEntries}
                   activeThreadKey={activeThreadKey}

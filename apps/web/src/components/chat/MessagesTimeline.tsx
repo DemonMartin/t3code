@@ -291,6 +291,8 @@ interface MessagesTimelineProps {
   ) => void;
   renderHtmlRender?: TimelineRowSharedState["renderHtmlRender"];
   turnItemSource?: TimelineRowSharedState["turnItemSource"];
+  /** Opens the composer's model picker, used by the notice a parked recovery leaves. */
+  onSwitchProvider?: () => void;
   /**
    * The thread this one is a subagent or side chat of; `open` is absent when it cannot be
    * opened from here.
@@ -419,6 +421,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   onOpenThread,
   renderHtmlRender,
   turnItemSource,
+  onSwitchProvider,
   parentThreadLink = null,
   workflowOpening = null,
   onForkFromRun,
@@ -1175,6 +1178,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     renderHtmlRender,
     turnItemSource,
     workflowOpening,
+    onSwitchProvider: onSwitchProvider ?? undefined,
     onForkFromRun,
     onToggleTurnFold,
     onToggleAttemptFold,

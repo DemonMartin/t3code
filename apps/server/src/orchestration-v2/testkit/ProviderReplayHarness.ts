@@ -623,7 +623,7 @@ export function layerWithRegistry<Error>(
     ThreadCommandExecutor.layer,
   ).pipe(
     Layer.provide(ProviderTurnStartServiceTestkit.layer),
-    Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+    Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, layerServerSettings)),
   );
 
   if (options.runEffectWorker === false) {
